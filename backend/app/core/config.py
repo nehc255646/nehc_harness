@@ -1,5 +1,6 @@
 """全量配置 — 对应 PLAN.md §10"""
 
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,11 +40,25 @@ class Settings(BaseSettings):
     blacklist_enabled: bool = True
     allow_rules_file: str = "./allow_rules.yaml"
 
+    # LLM (M1 临时调试，M3 后由 DB 管理)
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    def model_post_init(self, __context):
+        # 兼容 OPENAI_* 环境变量 (不经 pydantic 校验)
+        if not self.openai_api_key:
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not self.openai_base_url:
+            self.openai_base_url = os.getenv("OPENAI_BASE_URL")
+        if not self.openai_model:
+            self.openai_model = os.getenv("OPENAI_MODEL") or os.getenv("MODEL_NAME")
 
     @property
     def mysql_dsn(self) -> str:
