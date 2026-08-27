@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.uv/
+
+# Env
+.env
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# MySQL/Redis dump
+*.sql.gz
+
+# Logs
+logs/
+*.log
+
+# Workspace
+workspace/
+.env
+backend/.venv/
+frontend/dist/
+frontend/node_modules/
+*.tsbuildinfo

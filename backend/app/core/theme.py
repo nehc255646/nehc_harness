@@ -1,0 +1,6 @@
+"""预留：主题色常量 — 与前端 CSS 变量对齐"""
+
+ACCENT_CYAN = "#22D3EE"
+ACCENT_CYAN_DARK = "#06B6D4"
+BG_DARK = "#0A0A0A"
+BG_BLACK = "#000000"

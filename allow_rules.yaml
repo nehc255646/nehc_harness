@@ -1,0 +1,11 @@
+# 持久放行规则 (配置文件) — 按 PLAN.md §10
+allow_shell:            # 前 2 token 前缀匹配
+  - "git status"
+  - "npm run build"
+  - "git log"
+  - "git diff"
+  - "ls"
+allow_tools:            # 工具名直接放行
+  - read
+  - glob
+  - grep

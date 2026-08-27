@@ -1,0 +1,1 @@
+"""spawn_subagent / finish_subagent — 交互型 (M2)"""

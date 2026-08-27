@@ -1,0 +1,73 @@
+/** WebSocket 客户端封装 — 对应 PLAN.md §3 协议 */
+
+export type WSEvent = {
+  event: string;
+  payload: Record<string, unknown>;
+};
+
+export class HarnessWS {
+  private ws: WebSocket | null = null;
+  private url: string;
+  private handlers: Map<string, Set<(payload: Record<string, unknown>) => void>> = new Map();
+  private reconnectTimer: number | null = null;
+
+  constructor(url?: string) {
+    // .env VITE_WS_URL 或默认
+    const envUrl = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_WS_URL;
+    this.url = url || envUrl || `ws://${window.location.hostname}:8000/ws`;
+  }
+
+  connect(sessionId = "default") {
+    const full = `${this.url}?session_id=${sessionId}`;
+    this.ws = new WebSocket(full);
+    this.ws.onopen = () => this.emit("connection", { state: "connected" });
+    this.ws.onclose = () => {
+      this.emit("connection", { state: "disconnected" });
+      // 简单重连
+      if (this.reconnectTimer === null) {
+        this.reconnectTimer = window.setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect(sessionId);
+        }, 2000);
+      }
+    };
+    this.ws.onerror = () => this.emit("connection", { state: "error" });
+    this.ws.onmessage = (e) => {
+      try {
+        const msg: WSEvent = JSON.parse(e.data);
+        this.emit(msg.event, msg.payload);
+        this.emit("*", msg as unknown as Record<string, unknown>);
+      } catch {
+        console.warn("WS invalid json:", e.data);
+      }
+    };
+  }
+
+  send(event: string, payload: Record<string, unknown> = {}) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ event, payload }));
+    }
+  }
+
+  on(event: string, cb: (payload: Record<string, unknown>) => void) {
+    if (!this.handlers.has(event)) this.handlers.set(event, new Set());
+    this.handlers.get(event)!.add(cb);
+    return () => this.handlers.get(event)?.delete(cb);
+  }
+
+  private emit(event: string, payload: Record<string, unknown>) {
+    this.handlers.get(event)?.forEach((cb) => cb(payload));
+    if (event !== "*") this.handlers.get("*")?.forEach((cb) => cb({ event, payload } as unknown as Record<string, unknown>));
+  }
+
+  close() {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.ws?.close();
+    this.ws = null;
+  }
+}
+
+export const wsClient = new HarnessWS();

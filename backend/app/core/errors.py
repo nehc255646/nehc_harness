@@ -1,0 +1,19 @@
+"""错误码定义 — 对应 PLAN.md §3 Server→Client error codes"""
+
+from enum import Enum
+
+
+class ErrorCode(str, Enum):
+    MODEL_ERROR = "MODEL_ERROR"
+    MODEL_TIMEOUT = "MODEL_TIMEOUT"
+    TOOL_ERROR = "TOOL_ERROR"
+    APPROVAL_TIMEOUT = "APPROVAL_TIMEOUT"
+    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+    INTERNAL = "INTERNAL"
+
+
+class HarnessError(Exception):
+    def __init__(self, code: ErrorCode, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(f"[{code}] {message}")
