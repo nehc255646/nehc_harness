@@ -74,6 +74,18 @@ class AgentLoop:
             logger.info("Hydrated %d messages for session=%s", len(window), self.session_id)
         if summary:
             self.summary = summary
+        # PLAN §2.4 时序兜底：主 agent done 期间完成的迟到结果，续聊时喂回
+        try:
+            late_runs = await persist_mod.load_late_subagent_results(self.session_id)
+        except Exception:
+            late_runs = []
+        for run in late_runs:
+            content = f"[迟到子 agent 结果 {run.subagent_id}]\n{run.result}"
+            self.history.append({"role": "user", "content": content})
+            await self._persist_message("user", content)
+            await persist_mod.mark_subagent_fed_back(run.subagent_id)
+        if late_runs:
+            logger.info("Fed back %d late subagent results for session=%s", len(late_runs), self.session_id)
         self.executor = await Executor.from_session_id(self.session_id)
 
     def _ensure_running(self):
@@ -95,11 +107,11 @@ class AgentLoop:
                 break
         # 拒绝所有 pending 审批
         gate.reject_all_for_session(self.session_id, reason="stopped")
-        # 回收本 agent 的 shell 进程组
+        # 回收本 agent 的 shell 进程组（key 含 session 前缀，避免跨会话误杀）
         try:
             from app.tools.shell import kill_shell_group
 
-            kill_shell_group(self.agent_id)
+            kill_shell_group(self._shell_group())
         except Exception as e:
             logger.debug("Kill shell group failed: %s", e)
         self.state = "done"
@@ -110,6 +122,10 @@ class AgentLoop:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+    def _shell_group(self) -> str:
+        # 进程组 key 必须会话内唯一：不同会话的主 agent 同名 "main"，裸 agent_id 会互相误杀
+        return f"{self.session_id}:{self.agent_id}"
 
     # ---------- 广播 ----------
 
@@ -256,8 +272,7 @@ class AgentLoop:
                     await self._emit_message(text, done=True, record=False)
                 # 检查 finish_task
                 has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
-                # 并行分发（每轮重置派生计数）
-                self._turn_spawned = 0
+                # 并行分发
                 if not self._current_message_id:
                     self._current_message_id = str(uuid.uuid4())
                 # 先落 assistant 行，供同轮 ToolLog.message_id 关联
@@ -275,12 +290,6 @@ class AgentLoop:
                     "tool_calls": tool_calls,
                 }
                 self.history.append(assistant_msg)
-                await self._persist_message(
-                    "assistant",
-                    text or "",
-                    public_id=self._current_message_id,
-                    tool_calls=tool_calls,
-                )
                 for tr in tool_results:
                     self.history.append(
                         {
@@ -319,6 +328,8 @@ class AgentLoop:
             content = event.get("content", "")
             self.history.append({"role": "user", "content": content})
             await self._persist_message("user", content)
+            # PLAN §2.4：派生上限按唤醒周期（turn）计
+            self._turn_spawned = 0
             # 保证 running
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
@@ -330,6 +341,7 @@ class AgentLoop:
             content = f"[子 agent 结果 {sid}]\n{result}"
             self.history.append({"role": "user", "content": content})
             await self._persist_message("user", content)
+            self._turn_spawned = 0
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
                 await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
@@ -344,6 +356,7 @@ class AgentLoop:
             content = f"[工作型批量完成] batch_id={batch_id}\n" + "\n".join(lines)
             self.history.append({"role": "user", "content": content})
             await self._persist_message("user", content)
+            self._turn_spawned = 0
             # 聚合事件也广播，供前端 worker.batch_done 已由子 agent 广播，此处仅注入上下文
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
@@ -352,8 +365,8 @@ class AgentLoop:
             await self.stop()
 
     def _build_messages(self) -> list[dict]:
-        # 滑动窗口最近 N 个 turn (M1 简化：按消息条数取最近 window_n*2)
-        window = self.history[-settings.window_n * 2 :] if len(self.history) > settings.window_n * 2 else self.history
+        # 滑动窗口最近 N 个 turn（window_slice 吸附 tool 组边界）
+        _slid, window = window_slice(self.history, settings.window_n)
         return build_messages(SYSTEM_PROMPT, self.summary, window, [])
 
     async def _persist_message(
@@ -690,9 +703,23 @@ class AgentLoop:
                 logger.exception("Tool dispatch error: %s", name)
                 return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
-        # 并行 gather
+        # 并行 gather；异常合成错误结果而非丢弃，保证 history 中
+        # assistant.tool_calls 与 tool 消息一一配对（缺失会导致模型 API 400）
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
-        return [r for r in results if not isinstance(r, BaseException)]
+        out: list[dict] = []
+        for tc, r in zip(tool_calls, results):
+            if isinstance(r, BaseException):
+                out.append(
+                    {
+                        "call_id": tc.get("id") or "",
+                        "name": tc.get("name") or "",
+                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {r}",
+                        "is_error": True,
+                    }
+                )
+            else:
+                out.append(r)
+        return out
 
     async def _handle_spawn_tool(self, name: str, args: dict) -> str:
         # 延迟导入避免循环
@@ -729,19 +756,26 @@ class AgentLoop:
             constraints = args.get("constraints") or ""
             if not task:
                 return "[错误] spawn_worker 需提供 task"
-            self._turn_spawned += 1
-            return await spawn_worker_batch(
+            # 检查+占用原子（无 await），并行 spawn 不超限；失败回滚
+            self._turn_spawned += requested
+            result = await spawn_worker_batch(
                 self.session_id, [task], self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )
+            if result.startswith(("[拒绝]", "[错误]")):
+                self._turn_spawned -= requested
+            return result
         elif name == "spawn_workers":
             tasks = args.get("tasks") or []
             constraints = args.get("constraints") or ""
             if not tasks:
                 return "[错误] spawn_workers 需提供 tasks 数组"
-            self._turn_spawned += len(tasks)
-            return await spawn_worker_batch(
+            self._turn_spawned += requested
+            result = await spawn_worker_batch(
                 self.session_id, tasks, self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )
+            if result.startswith(("[拒绝]", "[错误]")):
+                self._turn_spawned -= requested
+            return result
         return f"[错误] 未知 spawn 工具: {name}"
 
     async def _execute_tool(self, name: str, args: dict, call_id: str, decision: str, reason: str) -> dict:
@@ -751,10 +785,18 @@ class AgentLoop:
         try:
             if name == "shell":
                 command = args.get("command") or args.get("cmd") or ""
-                # 异步执行 (进程组按 agent 分组，供 stop 定向回收)
+                # 空/不可解析参数（如 __raw 兜底）不执行，防止空命令静默成功
+                if not str(command).strip():
+                    result = "[错误] shell 命令为空或参数解析失败"
+                    is_error = True
+                    duration_ms = int((time.time() - start) * 1000)
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_error})
+                    await self._persist_tool_log(name, args, result, call_id, is_error, duration_ms, decision, reason)
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
+                # 异步执行 (进程组按 session:agent 分组，供 stop 定向回收)
                 from app.tools.shell import shell_async
 
-                output, code = await shell_async(command, group=self.agent_id)
+                output, code = await shell_async(command, group=self._shell_group())
                 result = output
                 is_error = code != 0 and code != 124  # 124 为超时
             else:

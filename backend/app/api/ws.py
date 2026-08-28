@@ -91,6 +91,9 @@ async def ws_endpoint(ws: WebSocket):
             elif event == "message.send":
                 content = payload.get("content", "")
                 sid = payload.get("session_id", session_id)
+                if not isinstance(content, str) or not content.strip():
+                    await ws.send_text(json.dumps({"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": "消息内容不能为空"}}))
+                    continue
                 from app import persist as persist_mod
 
                 await persist_mod.ensure_session(sid)
@@ -124,7 +127,7 @@ async def ws_endpoint(ws: WebSocket):
 
             elif event == "agent.stop":
                 sid = payload.get("agent_id", session_id) if isinstance(payload.get("agent_id"), str) else session_id
-                # 先查主 agent，再查子 agent（工作型可被 agent.stop 定向终止），最后兜底当前会话主 agent
+                # 先查主 agent，再查子 agent（工作型可被 agent.stop 定向终止）
                 target = manager.get(sid)
                 if target:
                     await target.stop()
@@ -137,11 +140,15 @@ async def ws_endpoint(ws: WebSocket):
                         logger.exception("Subagent stop failed")
                         ok = False
                     if not ok:
-                        main = manager.get(session_id)
-                        if main:
-                            await main.stop()
-                        else:
-                            await ws.send_text(json.dumps({"event": "agent.state", "payload": {"agent_id": sid, "state": "done"}}))
+                        # 目标不存在或已结束：报错而非兜底终止主 agent（避免误杀）
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "event": "error",
+                                    "payload": {"code": ErrorCode.SESSION_NOT_FOUND, "message": f"agent {sid} 不存在或已结束"},
+                                }
+                            )
+                        )
 
             elif event == "session.create":
                 new_id = str(uuid.uuid4())
@@ -175,7 +182,9 @@ async def ws_endpoint(ws: WebSocket):
 
                 await manager.drop(sid)
                 await persist_mod.update_session_fields(sid, status="deleted")
-                await broadcast(session_id, "session.deleted", {"session_id": sid})
+                gate.clear_session_rules(sid)
+                # 广播到被删会话的连接（而非当前连接所在会话）
+                await broadcast(sid, "session.deleted", {"session_id": sid})
 
             elif event == "subagent.response":
                 subagent_id = payload.get("subagent_id", "")

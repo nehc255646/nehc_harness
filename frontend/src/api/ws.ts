@@ -14,9 +14,12 @@ export class HarnessWS {
   private sessionId = "default";
 
   constructor(url?: string) {
-    // .env VITE_WS_URL 或默认
+    // .env VITE_WS_URL 或默认同源（Vite dev 已代理 /ws → 后端）；base 可带可不带 /ws，统一归一
     const envUrl = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_WS_URL;
-    this.url = url || envUrl || `ws://${window.location.hostname}:8000/ws`;
+    const base = (url || envUrl || "").replace(/\/+$/, "").replace(/\/ws$/, "");
+    this.url = base
+      ? `${base}/ws`
+      : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
   }
 
   connect(sessionId = "default") {

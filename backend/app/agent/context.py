@@ -46,11 +46,18 @@ def estimate_tokens(messages: list[dict], summary: str | None = None) -> int:
 
 
 def window_slice(history: list[dict], window_n: int) -> tuple[list[dict], list[dict]]:
-    """按 turn 近似：保留最近 window_n*2 条。返回 (slid_out, window)。"""
+    """按 turn 近似：保留最近 window_n*2 条。返回 (slid_out, window)。
+
+    窗口起点吸附到 tool 组边界：起点若为 tool 结果，则向前扩展至所属的
+    assistant(tool_calls) 行，避免窗口切开 tool_calls/tool 配对导致模型 API 400。
+    """
     keep = max(window_n * 2, 1)
     if len(history) <= keep:
         return [], list(history)
-    return history[:-keep], history[-keep:]
+    start = len(history) - keep
+    while start > 0 and history[start].get("role") == "tool":
+        start -= 1
+    return history[:start], history[start:]
 
 
 # ---------- 流式 tool_calls 累积解析（主 agent 与子 agent 共用） ----------

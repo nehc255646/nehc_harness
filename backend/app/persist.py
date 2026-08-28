@@ -438,6 +438,48 @@ async def load_history(session_id: str) -> tuple[list[dict], str | None, int | N
         return [], None, None
 
 
+async def load_late_subagent_results(session_id: str) -> list[SubAgentRun]:
+    """迟到未喂回的子 agent 结果（主 agent done 期间完成），续聊时喂回上下文。"""
+    if not is_available():
+        return []
+    try:
+        async with session_scope() as db:
+            if db is None:
+                return []
+            return list(
+                (
+                    await db.scalars(
+                        select(SubAgentRun)
+                        .where(
+                            SubAgentRun.main_session_id == session_id,
+                            SubAgentRun.late.is_(True),
+                            SubAgentRun.late_fed_back.is_(False),
+                            SubAgentRun.result.is_not(None),
+                            SubAgentRun.status.in_(("done", "error")),
+                        )
+                        .order_by(SubAgentRun.id.asc())
+                    )
+                ).all()
+            )
+    except Exception as e:
+        logger.warning("load_late_subagent_results failed: %s", e)
+        return []
+
+
+async def mark_subagent_fed_back(subagent_id: str) -> None:
+    if not is_available():
+        return
+    try:
+        async with session_scope() as db:
+            if db is None:
+                return
+            await db.execute(
+                update(SubAgentRun).where(SubAgentRun.subagent_id == subagent_id).values(late_fed_back=True)
+            )
+    except Exception as e:
+        logger.debug("mark_subagent_fed_back failed: %s", e)
+
+
 async def list_messages(session_id: str) -> list[Message]:
     if not is_available():
         return []

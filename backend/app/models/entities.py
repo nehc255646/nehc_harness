@@ -139,3 +139,4 @@ class SubAgentRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     late: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    late_fed_back: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

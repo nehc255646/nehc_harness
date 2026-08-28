@@ -50,6 +50,19 @@ class AgentManager:
                 await agent.stop()
             except Exception:
                 logger.exception("stop on drop failed: %s", session_id)
+        # 清理会话级内存登记：子 agent 注册表 + 会话放行规则
+        try:
+            from app.agent.subagent import purge_session
+
+            purge_session(session_id)
+        except Exception:
+            logger.exception("purge subagent registry failed: %s", session_id)
+        try:
+            from app.permissions.gate import gate
+
+            gate.clear_session_rules(session_id)
+        except Exception:
+            logger.exception("clear session rules failed: %s", session_id)
 
     def all_ids(self) -> list[str]:
         return list(self._agents.keys())

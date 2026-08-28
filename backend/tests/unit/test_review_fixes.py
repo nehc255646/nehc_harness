@@ -139,3 +139,40 @@ async def test_shell_pgid_kept_on_cancel():
     shell_mod.kill_shell_group("ut_cancel")
     await asyncio.sleep(0.05)
     assert not shell_mod._active_pgs.get("ut_cancel")
+
+
+async def test_shell_group_key_scoped_per_session():
+    """不同会话的主 agent 进程组 key 必须不同（防跨会话 stop 误杀）"""
+    a = AgentLoop("ut_sess_a")
+    b = AgentLoop("ut_sess_b")
+    assert a._shell_group() != b._shell_group()
+    assert a.session_id in a._shell_group()
+
+
+async def test_purge_session_clears_registries():
+    """会话删除后子 agent 注册表/批次/索引全部清理，防内存泄漏"""
+    sa._subagents["wk_purge1"] = sa.SubAgentRecord(
+        subagent_id="wk_purge1", session_id="ut_purge", kind="worker", status="done", task="t", batch_id="batch_purge"
+    )
+    sa._session_index.setdefault("ut_purge", set()).add("wk_purge1")
+    sa._batches["batch_purge"] = {"workers": ["wk_purge1"], "results": {}, "total": 1}
+    sa._loops["wk_purge1"] = object()  # type: ignore[assignment]
+    sa.purge_session("ut_purge")
+    assert "wk_purge1" not in sa._subagents
+    assert "wk_purge1" not in sa._loops
+    assert "wk_purge1" not in sa._tasks
+    assert "batch_purge" not in sa._batches
+    assert "ut_purge" not in sa._session_index
+
+
+async def test_shell_empty_command_rejected(monkeypatch):
+    """空/不可解析的 shell 命令不执行（防 __raw 兜底导致空命令静默成功）"""
+    ag = AgentLoop("ut_empty_shell")
+
+    async def noop_log(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(ag, "_persist_tool_log", noop_log)
+    res = await ag._execute_tool("shell", {"command": ""}, "c_empty", "config_allow", "")
+    assert res["is_error"] is True
+    assert "空" in res["result"]

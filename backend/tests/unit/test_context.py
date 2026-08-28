@@ -47,3 +47,22 @@ def test_estimate_tokens_and_window():
     slid, window = window_slice(msgs, 2)
     assert len(window) == 4
     assert len(slid) == 6
+
+
+def test_window_slice_snaps_tool_group_boundary():
+    """窗口起点落在 tool 结果上时，向前扩展到所属 assistant(tool_calls)，保持配对完整"""
+    history = [{"role": "user", "content": f"m{i}"} for i in range(5)]
+    # 一组 tool 对话：assistant(tool_calls) + 3 条 tool 结果
+    tool_group = [
+        {"role": "assistant", "content": "", "tool_calls": [{"name": "shell", "args": {}, "id": "c1"}]},
+        {"role": "tool", "content": "out1", "tool_call_id": "c1", "name": "shell"},
+        {"role": "tool", "content": "out2", "tool_call_id": "c1", "name": "shell"},
+        {"role": "tool", "content": "out3", "tool_call_id": "c1", "name": "shell"},
+    ]
+    history.extend(tool_group)
+    history.append({"role": "user", "content": "final"})
+    _slid, window = window_slice(history, 2)  # keep=4，硬切起点=6 恰落在 tool 上
+    # 吸附后窗口首条不得是 tool，应为所属 assistant(tool_calls)
+    assert window[0]["role"] != "tool"
+    assert window[0].get("tool_calls"), "窗口应包含完整 assistant(tool_calls) 组"
+    assert len(window) == 5

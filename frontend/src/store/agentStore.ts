@@ -176,6 +176,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("message.done", (p) => {
     const id = p.message_id as string;
     const subagentId = subMessageOwner.get(id);
+    subMessageOwner.delete(id);
     if (subagentId) {
       set((s) => ({
         subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) =>
@@ -194,7 +195,11 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     }
   });
 
-  wsClient.on("tool.start", (p) => set((s) => ({ toolCalls: [...s.toolCalls, { call_id: p.call_id as string, name: p.name as string, args: p.args }] })));
+  wsClient.on("tool.start", (p) => {
+    // 工作型子 agent 工具不进主聊天（PLAN §2.4：工作区仅列表，无详细日志）
+    if (p.subagent_id) return;
+    set((s) => ({ toolCalls: [...s.toolCalls, { call_id: p.call_id as string, name: p.name as string, args: p.args }] }));
+  });
   wsClient.on("tool.result", (p) =>
     set((s) => ({ toolCalls: s.toolCalls.map((t) => (t.call_id === p.call_id ? { ...t, result: p.result } : t)) })),
   );

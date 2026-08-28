@@ -163,15 +163,23 @@ class Executor:
             yield chunk
 
     async def astream_with_retry(self, messages: list[dict], tools: list | None = None):
-        """流式生成 + 指数退避重试 — loop 主调用入口"""
+        """流式生成 + 指数退避重试 — loop 主调用入口。
+
+        仅在尚未产出任何 chunk 时重试：中途失败重试会导致已广播的部分内容
+        与重试全文拼接重复，故已开始输出后直接抛错交给上层处理。
+        """
         last_err: Exception | None = None
         for attempt in range(self.retry_count + 1):
+            yielded = False
             try:
                 async for chunk in self.astream(messages, tools):
+                    yielded = True
                     yield chunk
                 return
             except Exception as e:
                 last_err = e
+                if yielded:
+                    raise
                 if attempt < self.retry_count:
                     delay = 2**attempt
                     logger.warning("LLM 流式失败，%ss 后重试 (%d/%d): %s", delay, attempt + 1, self.retry_count, e)

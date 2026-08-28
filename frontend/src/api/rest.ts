@@ -132,8 +132,12 @@ export function mergeChatMessages(
       streaming: cur.streaming,
     };
   });
+  // 本地 user 气泡（local-*）若已落库则跳过，防重连后同一条消息显示两次
+  const restUserTexts = new Set(fromRest.filter((m) => m.role === "user").map((m) => m.content));
   for (const m of live) {
-    if (!restIds.has(m.id)) merged.push(m);
+    if (restIds.has(m.id)) continue;
+    if (m.role === "user" && m.id.startsWith("local-") && restUserTexts.has(m.content)) continue;
+    merged.push(m);
   }
   return merged;
 }

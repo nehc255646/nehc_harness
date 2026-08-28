@@ -13,6 +13,7 @@ from app.agent.context import (
     build_messages,
     parse_tool_calls,
     truncate_tool_result,
+    window_slice,
 )
 from app.agent.executor import Executor
 from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
@@ -101,8 +102,8 @@ async def _broadcast(session_id: str, event: str, payload: dict, broadcaster=Non
 
 def _snapshot_history(main_history: list[dict], max_pairs: int | None = None) -> list[dict]:
     n = max_pairs or settings.window_n
-    window = main_history[-n * 2 :] if len(main_history) > n * 2 else list(main_history)
-    return window
+    _slid, window = window_slice(main_history, n)
+    return list(window)
 
 
 def get_active_count(session_id: str) -> int:
@@ -210,7 +211,7 @@ class SubAgentLoop:
         self.history = hist
 
     def _build_messages(self) -> list[dict]:
-        window = self.history[-settings.window_n * 2 :] if len(self.history) > settings.window_n * 2 else self.history
+        _slid, window = window_slice(self.history, settings.window_n)
         system = INTERACTIVE_SYSTEM_PROMPT if self.kind == "interactive" else WORKER_SYSTEM_PROMPT
         return build_messages(system, self.summary, window, [])
 
@@ -333,11 +334,6 @@ class SubAgentLoop:
                     self.history.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
                     for tr in tool_results:
                         self.history.append({"role": "tool", "content": tr["result"], "tool_call_id": tr["call_id"], "name": tr["name"]})
-                    # 检查是否含 finish_worker 刚执行
-                    has_fin = any(tr["name"] == "finish_worker" for tr in tool_results)
-                    if has_fin:
-                        # 已在 _execute 内 finish，此处直接退出
-                        break
                     continue
                 else:
                     # 交互型不应有其他工具，忽略
@@ -480,20 +476,8 @@ class SubAgentLoop:
             name = tc.get("name") or ""
             args = tc.get("args") or {}
             try:
-                if name == "finish_worker":
-                    result = args.get("result") or args.get("message") or "工作完成"
-                    # 标记完成
-                    rec = _subagents.get(self.subagent_id)
-                    if rec:
-                        rec.status = "done"
-                        rec.result = result
-                        rec.finished_at = time.time()
-                    await _broadcast(self.session_id, "worker.status", {"workers": get_workers(self.session_id)}, self.broadcaster)
-                    # 回投逻辑延迟到外层 _finish，此处仅返回
-                    # 但需立即触发 batch 聚合检查
-                    await self._handle_worker_finish(result, "done")
-                    return {"call_id": call_id, "name": name, "result": f"[完成] {result}", "is_error": False}
-                if name in ("spawn_worker", "spawn_subagent"):
+                # finish_worker 已在外层 _run_loop 拦截收敛，不进入分发
+                if name in ("spawn_worker", "spawn_workers", "spawn_subagent"):
                     return {"call_id": call_id, "name": name, "result": "[拒绝] 工作型不支持递归派生", "is_error": True}
                 session_rules = gate.get_session_rules(self.session_id)
                 decision, reason, needs_approval = check_policy(name, args, session_rules)
@@ -525,8 +509,22 @@ class SubAgentLoop:
                 logger.exception("Worker tool dispatch error")
                 return {"call_id": call_id, "name": name, "result": f"[异常] {e}", "is_error": True}
 
+        # 并行 gather；异常合成错误结果而非丢弃，保证 tool_calls/tool 配对
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
-        return [r for r in results if not isinstance(r, BaseException)]
+        out: list[dict] = []
+        for tc, r in zip(tool_calls, results):
+            if isinstance(r, BaseException):
+                out.append(
+                    {
+                        "call_id": tc.get("id") or "",
+                        "name": tc.get("name") or "",
+                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {r}",
+                        "is_error": True,
+                    }
+                )
+            else:
+                out.append(r)
+        return out
 
     async def _persist_worker_log(
         self,
@@ -563,6 +561,12 @@ class SubAgentLoop:
         try:
             if name == "shell":
                 command = args.get("command") or args.get("cmd") or ""
+                # 空/不可解析参数（如 __raw 兜底）不执行，防止空命令静默成功
+                if not str(command).strip():
+                    result = "[错误] shell 命令为空或参数解析失败"
+                    await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": True, "subagent_id": self.subagent_id}, self.broadcaster)
+                    await self._persist_worker_log(name, args, result, call_id, True, decision, reason or None)
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 from app.tools.shell import shell_async
 
                 output, code = await shell_async(command, group=self.subagent_id)
@@ -835,6 +839,20 @@ async def stop_session_subagents(session_id: str) -> int:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     return n
+
+
+def purge_session(session_id: str) -> None:
+    """会话删除后清理该会话全部内存登记（records/loops/tasks/batches/索引），防泄漏。"""
+    ids = list(_session_index.pop(session_id, set()) or [])
+    batch_ids: set[str] = set()
+    for sid in ids:
+        rec = _subagents.pop(sid, None)
+        if rec and rec.batch_id:
+            batch_ids.add(rec.batch_id)
+        _loops.pop(sid, None)
+        _tasks.pop(sid, None)
+    for bid in batch_ids:
+        _batches.pop(bid, None)
 
 
 def list_panels_and_workers(session_id: str) -> tuple[list[dict], list[dict]]:
