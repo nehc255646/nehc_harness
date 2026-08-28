@@ -95,15 +95,24 @@ def glob(pattern: str) -> str:
         return f"[错误] 越权路径: {pattern}"
     try:
         matches = glob_module.glob(pattern, root_dir=str(wd), recursive=True)
-        if not matches:
-            return "(无匹配)"
-        # 限制输出
-        if len(matches) > 200:
-            matches = matches[:200]
-            return "\n".join(matches) + "\n...[截断，超过 200 条]..."
-        return "\n".join(matches)
     except Exception as e:
         return f"[错误] glob 失败: {e}"
+    # 逐条校验结果仍在 WORKDIR 内（防内嵌 ../ 逃逸），越权条目直接丢弃
+    safe: list[str] = []
+    for m in matches:
+        target = (wd / m).resolve()
+        try:
+            target.relative_to(wd)
+        except ValueError:
+            continue
+        safe.append(m)
+    if not safe:
+        return "(无匹配)"
+    # 限制输出
+    if len(safe) > 200:
+        safe = safe[:200]
+        return "\n".join(safe) + "\n...[截断，超过 200 条]..."
+    return "\n".join(safe)
 
 
 @tool

@@ -1,6 +1,7 @@
 """手写 asyncio loop — 对应 PLAN.md §2.1"""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -49,8 +50,9 @@ class AgentLoop:
 
     async def enqueue(self, event: dict):
         await self.queue.put(event)
-        # 若 idle，唤醒 loop
-        if self.state == "idle" and self._task and self._task.done():
+        # 任务已结束（idle/done/error 任意终态）时，新事件唤醒新一轮 run；
+        # 任务仍在运行时事件由 run 内的 queue.get 消费，不重复拉起
+        if self._task is None or self._task.done():
             self._ensure_running()
 
     async def start(self):
@@ -111,8 +113,9 @@ class AgentLoop:
 
     async def run(self):
         logger.info("AgentLoop run started: session=%s", self.session_id)
-        self.state = "running"
-        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+        # 初始无待处理工作时保持 idle，不误报 running
+        self.state = "idle" if self.queue.empty() and not self.history else "running"
+        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": self.state})
 
         try:
             while not self._stop_event.is_set():
@@ -120,7 +123,7 @@ class AgentLoop:
                 if not self.history or self.state == "idle":
                     # idle 时阻塞等待
                     try:
-                        event = await asyncio.wait_for(self.queue.get(), timeout=None)
+                        event = await self.queue.get()
                         # 若收到 stop 信号，直接退出
                         if self._stop_event.is_set():
                             break
@@ -179,53 +182,53 @@ class AgentLoop:
                 text = result.get("text") or ""
                 already_streamed = result.get("streamed", False)
 
-                # 4. 文本部分先流式推送 (独立消息) — 若 _call_model 已流式则不再重复
-                if text and not already_streamed:
-                    await self._emit_message(text, done=True)
-
-                # 5. 若含 tool_calls，分发执行
-                if tool_calls:
-                    # 检查 finish_task
-                    has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
-                    # 并行分发
-                    tool_results = await self._dispatch_tools(tool_calls)
-                    # 原子回填历史 (assistant tool_calls + tool results)
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": text or "",
-                        "tool_calls": tool_calls,
-                    }
-                    self.history.append(assistant_msg)
-                    for tr in tool_results:
-                        self.history.append(
-                            {
-                                "role": "tool",
-                                "content": tr["result"],
-                                "tool_call_id": tr["call_id"],
-                                "name": tr["name"],
-                            }
-                        )
-                    # 大结果截断已在 dispatch 内处理
-
-                    if has_finish:
-                        self.state = "done"
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
-                        break
-                    # 否则继续下一轮 (goto 2)，不进入 idle
-                    continue
-                else:
-                    # 纯文本，进入 idle，等待下一事件
+                # 4. 纯文本分支：流式过的仅补 history，未流式的推送并记录
+                if not tool_calls:
                     if not text:
-                        # 空响应也进 idle
+                        # 空响应兜底
                         text = "(模型无返回)"
                         await self._emit_message(text, done=True)
                     elif already_streamed:
                         # 真实模型流式已推送，补 history 供下一轮上下文
                         self.history.append({"role": "assistant", "content": text})
+                    else:
+                        await self._emit_message(text, done=True)
+                    # 进入 idle，等待下一事件
                     self.state = "idle"
                     await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "idle"})
-                    # 阻塞等待下一事件在下一轮循环开头处理
                     continue
+
+                # 5. tool_calls 分支：文本只随 assistant_msg 入 history，避免重复记录
+                if text and not already_streamed:
+                    await self._emit_message(text, done=True, record=False)
+                # 检查 finish_task
+                has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
+                # 并行分发
+                tool_results = await self._dispatch_tools(tool_calls)
+                # 原子回填历史 (assistant tool_calls + tool results)
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": text or "",
+                    "tool_calls": tool_calls,
+                }
+                self.history.append(assistant_msg)
+                for tr in tool_results:
+                    self.history.append(
+                        {
+                            "role": "tool",
+                            "content": tr["result"],
+                            "tool_call_id": tr["call_id"],
+                            "name": tr["name"],
+                        }
+                    )
+                # 大结果截断已在 dispatch 内处理
+
+                if has_finish:
+                    self.state = "done"
+                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
+                    break
+                # 否则继续下一轮 (goto 2)，不进入 idle
+                continue
 
         except asyncio.CancelledError:
             logger.info("AgentLoop cancelled: %s", self.session_id)
@@ -352,8 +355,6 @@ class AgentLoop:
             if not name:
                 continue
             # args 可能是 JSON 字符串
-            import json
-
             try:
                 args = json.loads(args_str) if args_str else {}
                 if isinstance(args, str):
@@ -461,7 +462,7 @@ class AgentLoop:
             "tool_calls": [],
         }
 
-    async def _emit_message(self, content: str, done: bool = True):
+    async def _emit_message(self, content: str, done: bool = True, record: bool = True):
         message_id = str(uuid.uuid4())
         await self._broadcast("message.start", {"agent_id": self.agent_id, "message_id": message_id, "role": "assistant"})
         # 简易分片流式
@@ -471,26 +472,12 @@ class AgentLoop:
             await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": chunk})
             await asyncio.sleep(0.02)
         await self._broadcast("message.done", {"message_id": message_id, "role": "assistant", "content": content})
-        # 落历史
-        self.history.append({"role": "assistant", "content": content})
+        # 落历史 (record=False 时由调用方随 assistant_msg 统一回填，避免重复)
+        if record:
+            self.history.append({"role": "assistant", "content": content})
 
     async def _dispatch_tools(self, tool_calls: list[dict]) -> list[dict]:
         """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回（M2 支持 spawn_*）"""
-
-        # M2 批量并发检查：预校验本轮 spawn_worker 数量
-        spawn_worker_calls = [tc for tc in tool_calls if tc.get("name") in ("spawn_worker", "spawn_workers")]
-        if len(spawn_worker_calls) > 0:
-            # 统计本次请求的 worker 数量
-            total_req = 0
-            for tc in spawn_worker_calls:
-                args = tc.get("args") or {}
-                if tc.get("name") == "spawn_workers":
-                    total_req += len(args.get("tasks") or [])
-                else:
-                    total_req += 1
-            if total_req > settings.max_workers_per_turn:
-                # 直接返回拒绝，不走审批
-                pass  # 让 _run_one 内部按规则拒绝
 
         async def _run_one(tc: dict) -> dict:
             call_id = tc.get("id") or ""
@@ -568,7 +555,7 @@ class AgentLoop:
             from app.agent.subagent import spawn_interactive, spawn_worker_batch
         except Exception as e:
             return f"[错误] 子 agent 模块未就绪: {e}"
-        # 获取主队列与 broadcaster
+        # 获取主 agent 唤醒入口与 broadcaster（传 enqueue 而非裸 queue，保证终态后回投可唤醒）
         broadcaster = self.broadcaster
         if name == "spawn_subagent":
             behavior_desc = args.get("behavior_desc") or args.get("behavior") or ""
@@ -576,7 +563,7 @@ class AgentLoop:
             if not behavior_desc and not goal:
                 return "[错误] spawn_subagent 需提供 behavior_desc 或 goal"
             return await spawn_interactive(
-                self.session_id, behavior_desc, goal, self.history, self.summary, broadcaster, self.queue, manager.get
+                self.session_id, behavior_desc, goal, self.history, self.summary, broadcaster, self.enqueue, manager.get
             )
         elif name == "spawn_worker":
             task = args.get("task") or ""
@@ -584,7 +571,7 @@ class AgentLoop:
             if not task:
                 return "[错误] spawn_worker 需提供 task"
             return await spawn_worker_batch(
-                self.session_id, [task], self.history, self.summary, broadcaster, self.queue, manager.get, constraints
+                self.session_id, [task], self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )
         elif name == "spawn_workers":
             tasks = args.get("tasks") or []
@@ -593,7 +580,7 @@ class AgentLoop:
                 return "[错误] spawn_workers 需提供 tasks 数组"
             # 防全量转包：检查任务描述是否过于宽泛
             return await spawn_worker_batch(
-                self.session_id, tasks, self.history, self.summary, broadcaster, self.queue, manager.get, constraints
+                self.session_id, tasks, self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )
         return f"[错误] 未知 spawn 工具: {name}"
 

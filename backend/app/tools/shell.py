@@ -5,6 +5,8 @@ import logging
 import os
 import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -116,12 +118,27 @@ async def shell_async(command: str, timeout: int | None = None, group: str | Non
 
 
 def kill_shell_group(group: str) -> None:
-    """回收指定 agent 的 shell 进程组"""
-    for pgid in list(_active_pgs.get(group, ())):
+    """回收指定 agent 的 shell 进程组（SIGTERM → 2s 后升级 SIGKILL，PLAN §3 语义）"""
+    pgids = list(_active_pgs.get(group, ()))
+    _active_pgs.pop(group, None)
+    if not pgids:
+        return
+    for pgid in pgids:
         try:
             os.killpg(pgid, signal.SIGTERM)
         except Exception as e:
             logger.debug("Kill shell group failed: %s", e)
+
+    def _escalate():
+        time.sleep(2)
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception as e:
+                logger.debug("Escalate SIGKILL failed: %s", e)
+
+    # 后台线程延迟升级，不阻塞调用方也不依赖事件循环
+    threading.Timer(2.0, _escalate).start()
 
 
 def kill_all_shell_groups() -> None:

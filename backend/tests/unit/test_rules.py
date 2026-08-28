@@ -1,7 +1,6 @@
 """rules 单元测试 — 黑名单拆分/前缀匹配/会话规则 (PLAN §8)"""
 
 from app.permissions.rules import (
-    extract_shell_prefix,
     is_blacklisted,
     is_session_shell_allowed,
     is_session_tool_allowed,
@@ -16,18 +15,25 @@ def test_blacklist_basic():
     assert is_blacklisted("ls -la") == (False, None)
 
 
+def test_blacklist_rm_flag_variants():
+    # 递归+强制组合的等价写法全部命中
+    assert is_blacklisted("rm -r -f /x") == (True, "rm -rf")
+    assert is_blacklisted("rm -fr /x") == (True, "rm -rf")
+    assert is_blacklisted("rm -Rf /x") == (True, "rm -rf")
+    assert is_blacklisted("rm --recursive --force /x") == (True, "rm -rf")
+    assert is_blacklisted("sudo rm -r -f /x") == (True, "rm -rf")
+    # 无递归或无强制的普通删除不拦
+    assert is_blacklisted("rm -f file.txt") == (False, None)
+    assert is_blacklisted("rm -r dir") == (False, None)
+    assert is_blacklisted("rm file.txt") == (False, None)
+
+
 def test_blacklist_split_by_separators():
     # 按 ; && || | 拆分后逐段匹配
     assert is_blacklisted("echo hi && rm -rf /tmp/x") == (True, "rm -rf")
     assert is_blacklisted("ls -la; sudo rm -rf /") == (True, "rm -rf")
     assert is_blacklisted("cat a.txt | shred") == (True, "shred")
     assert is_blacklisted("echo hi || echo bye") == (False, None)
-
-
-def test_shell_prefix_extract():
-    assert extract_shell_prefix("git push origin main") == "git push"
-    assert extract_shell_prefix("  ls   -la  ") == "ls -la"
-    assert extract_shell_prefix("") == ""
 
 
 def test_config_allow():

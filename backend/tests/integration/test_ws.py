@@ -21,33 +21,31 @@ def _recv_until(ws, event_name: str):
 
 def test_ws_approval_flow():
     session_id = f"it_{uuid.uuid4().hex[:8]}"
-    with TestClient(app) as client:
-        with client.websocket_connect(f"/ws?session_id={session_id}") as ws:
-            hello = _recv_until(ws, "session.hello")
-            assert hello["session_id"] == session_id
+    with TestClient(app) as client, client.websocket_connect(f"/ws?session_id={session_id}") as ws:
+        hello = _recv_until(ws, "session.hello")
+        assert hello["session_id"] == session_id
 
-            ws.send_json({"event": "message.send", "payload": {"session_id": session_id, "content": "执行 echo hello"}})
+        ws.send_json({"event": "message.send", "payload": {"session_id": session_id, "content": "执行 echo hello"}})
 
-            # heuristic 演示模式：生成 shell echo hello → 需审批
-            req = _recv_until(ws, "approval.request")
-            assert req["tool"] == "shell"
+        # heuristic 演示模式：生成 shell echo hello → 需审批
+        req = _recv_until(ws, "approval.request")
+        assert req["tool"] == "shell"
 
-            ws.send_json({"event": "approval.response", "payload": {"approval_id": req["approval_id"], "decision": "approve"}})
+        ws.send_json({"event": "approval.response", "payload": {"approval_id": req["approval_id"], "decision": "approve"}})
 
-            resolved = _recv_until(ws, "approval.resolved")
-            assert resolved["approved"] is True
+        resolved = _recv_until(ws, "approval.resolved")
+        assert resolved["approved"] is True
 
-            result = _recv_until(ws, "tool.result")
-            assert result["is_error"] is False
-            assert "hello" in result["result"]
+        result = _recv_until(ws, "tool.result")
+        assert result["is_error"] is False
+        assert "hello" in result["result"]
 
 
 def test_ws_blacklist_blocked():
     session_id = f"it_{uuid.uuid4().hex[:8]}"
-    with TestClient(app) as client:
-        with client.websocket_connect(f"/ws?session_id={session_id}") as ws:
-            _recv_until(ws, "session.hello")  # hello
-            ws.send_json({"event": "message.send", "payload": {"session_id": session_id, "content": "执行 rm -rf /"}})
-            result = _recv_until(ws, "tool.result")
-            assert result["is_error"] is True
-            assert "blocked" in result["result"]
+    with TestClient(app) as client, client.websocket_connect(f"/ws?session_id={session_id}") as ws:
+        _recv_until(ws, "session.hello")  # hello
+        ws.send_json({"event": "message.send", "payload": {"session_id": session_id, "content": "执行 rm -rf /"}})
+        result = _recv_until(ws, "tool.result")
+        assert result["is_error"] is True
+        assert "blocked" in result["result"]

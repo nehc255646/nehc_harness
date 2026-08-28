@@ -10,6 +10,8 @@ export class HarnessWS {
   private url: string;
   private handlers: Map<string, Set<(payload: Record<string, unknown>) => void>> = new Map();
   private reconnectTimer: number | null = null;
+  // 跟踪最新会话，断线重连时使用（session.select 切换后不回连旧会话）
+  private sessionId = "default";
 
   constructor(url?: string) {
     // .env VITE_WS_URL 或默认
@@ -18,16 +20,34 @@ export class HarnessWS {
   }
 
   connect(sessionId = "default") {
+    // 关闭旧连接（detach 回调避免触发重连定时器），支持幂等调用
+    if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
+      try {
+        this.ws.close();
+      } catch {
+        /* ignore */
+      }
+      this.ws = null;
+    }
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.sessionId = sessionId;
     const full = `${this.url}?session_id=${sessionId}`;
     this.ws = new WebSocket(full);
     this.ws.onopen = () => this.emit("connection", { state: "connected" });
     this.ws.onclose = () => {
       this.emit("connection", { state: "disconnected" });
-      // 简单重连
+      // 简单重连，使用最新会话
       if (this.reconnectTimer === null) {
         this.reconnectTimer = window.setTimeout(() => {
           this.reconnectTimer = null;
-          this.connect(sessionId);
+          this.connect(this.sessionId);
         }, 2000);
       }
     };
@@ -42,6 +62,10 @@ export class HarnessWS {
         console.warn("WS invalid json:", e.data);
       }
     };
+  }
+
+  setSession(sessionId: string) {
+    this.sessionId = sessionId;
   }
 
   send(event: string, payload: Record<string, unknown> = {}) {

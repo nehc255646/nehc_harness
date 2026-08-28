@@ -14,9 +14,15 @@ export default function SessionSidebar() {
       </button>
       <div className="mt-2 space-y-1">
         {sessions.map((s) => (
-          <div key={s} className={`rounded px-2 py-1 text-sm ${s === sessionId ? "bg-zinc-900 text-cyan-400" : "text-zinc-400"}`}>
+          <button
+            key={s}
+            onClick={() => {
+              if (s !== sessionId) wsClient.send("session.select", { session_id: s });
+            }}
+            className={`w-full rounded px-2 py-1 text-left text-sm truncate ${s === sessionId ? "bg-zinc-900 text-cyan-400" : "text-zinc-400 hover:bg-zinc-900"}`}
+          >
             {s}
-          </div>
+          </button>
         ))}
       </div>
       <p className="mt-auto text-xs text-zinc-600">M5 多会话侧栏占位</p>

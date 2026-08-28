@@ -34,16 +34,6 @@ def get_allow_tools() -> list[str]:
     return _load_yaml().get("allow_tools", [])
 
 
-def extract_shell_prefix(command: str, n: int = 2) -> str:
-    """取命令前 n 个 token 作为前缀，用于同类判定 (PLAN 定稿: 固定 2)"""
-    # 去除前后空白，取第一段子命令 (按 ; && || | 分割取首段仅用于前缀提取？实际匹配时对每段都检查)
-    # 前缀提取直接对原始 command 的 token 化
-    tokens = command.strip().split()
-    if not tokens:
-        return ""
-    return " ".join(tokens[:n])
-
-
 def is_shell_prefix_allowed(command: str) -> bool:
     """检查是否命中 allow_rules.yaml 的 allow_shell 前缀"""
     prefixes = get_allow_shell_prefixes()
@@ -78,9 +68,8 @@ def _split_shell_commands(command: str) -> list[str]:
 # ---------- 黑名单 ----------
 
 # 默认集 — 常见破坏性命令 (可配置关闭)
+# rm 的递归+强制组合由 _rm_rf_hit 按 token 判定（覆盖 -rf/-r -f/--recursive --force 等写法），不在此列
 _DEFAULT_BLACKLIST_PATTERNS: list[tuple[str, str]] = [
-    (r"\brm\s+.*-rf\b", "rm -rf"),
-    (r"\brm\s+-rf\b", "rm -rf"),
     (r"\bmkfs\b", "mkfs"),
     (r"\bdd\b.*\bof=/dev/", "dd of=/dev"),
     (r"\bsudo\s+rm\b", "sudo rm"),
@@ -94,6 +83,33 @@ _DEFAULT_BLACKLIST_PATTERNS: list[tuple[str, str]] = [
     (r"\bpoweroff\b", "poweroff"),
 ]
 
+_RM_FLAG_RECURSIVE = ("r", "R", "recursive")
+_RM_FLAG_FORCE = ("f", "force")
+
+
+def _rm_rf_hit(tokens: list[str]) -> bool:
+    """rm 同时带递归与强制旗标即命中（兼容 sudo 前缀与组合短旗标如 -rf/-fr）"""
+    start = 1 if tokens and tokens[0] == "sudo" else 0
+    if len(tokens) <= start or tokens[start] != "rm":
+        return False
+    recursive = force = False
+    for t in tokens[start + 1 :]:
+        if t == "--":
+            break  # -- 之后的都是文件名
+        if t.startswith("--"):
+            name = t[2:].split("=", 1)[0]
+            if name in _RM_FLAG_RECURSIVE:
+                recursive = True
+            elif name in _RM_FLAG_FORCE:
+                force = True
+        elif re.fullmatch(r"-[a-zA-Z]+", t):
+            letters = set(t[1:])
+            if letters & {"r", "R"}:
+                recursive = True
+            if "f" in letters:
+                force = True
+    return recursive and force
+
 
 def is_blacklisted(command: str) -> tuple[bool, str | None]:
     """检查是否命中黑名单，返回 (是否命中, 命中项描述)"""
@@ -103,6 +119,8 @@ def is_blacklisted(command: str) -> tuple[bool, str | None]:
         sub = sub.strip()
         if not sub:
             continue
+        if _rm_rf_hit(sub.split()):
+            return True, "rm -rf"
         for pattern, desc in _DEFAULT_BLACKLIST_PATTERNS:
             if re.search(pattern, sub):
                 return True, desc

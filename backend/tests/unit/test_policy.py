@@ -4,7 +4,7 @@ from app.permissions.policy import check_policy
 
 
 def test_blacklist_blocked():
-    decision, reason, need = check_policy("shell", {"command": "rm -rf /"}, [])
+    decision, _, need = check_policy("shell", {"command": "rm -rf /"}, [])
     assert decision == "blocked"
     assert need is False
 

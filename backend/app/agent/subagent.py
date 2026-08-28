@@ -1,5 +1,7 @@
 """子 agent 快照/隔离/回投 — 分交互型与工作型 (M2 实现)"""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -15,6 +17,9 @@ from app.permissions.policy import check_policy
 from app.tools.registry import TOOLS
 
 logger = logging.getLogger("harness.subagent")
+
+# 交互型空闲超时：等待用户侧栏输入的最长时间，超时自动收敛（不空转调模型）
+_INTERACTIVE_IDLE_TIMEOUT = 120
 
 # LangChain 工具集：交互型仅 finish_subagent，工作型全量
 try:
@@ -59,7 +64,7 @@ class SubAgentRecord:
 # 全局注册表 (单进程)
 _subagents: dict[str, SubAgentRecord] = {}
 _session_index: dict[str, set[str]] = {}
-_batches: dict[str, dict] = {}  # batch_id -> {workers:[id], results:{id: (status,result)}, done_count, total}
+_batches: dict[str, dict] = {}  # batch_id -> {workers:[id], results:{id: (status,result)}, total}
 _tasks: dict[str, asyncio.Task] = {}
 _loops: dict[str, SubAgentLoop] = {}
 
@@ -159,7 +164,7 @@ class SubAgentLoop:
         snapshot: list[dict],
         summary: str | None,
         broadcaster,
-        main_queue: asyncio.Queue,
+        main_enqueue,
         batch_id: str | None = None,
         manager_get=None,
     ):
@@ -171,13 +176,15 @@ class SubAgentLoop:
         self.snapshot = snapshot
         self.summary = summary
         self.broadcaster = broadcaster
-        self.main_queue = main_queue
+        # 主 agent 队列入口（bound enqueue），保证主 agent 终态后回投仍可唤醒
+        self.main_enqueue = main_enqueue
         self.batch_id = batch_id
         self.manager_get = manager_get
         self.queue: asyncio.Queue = asyncio.Queue()
         self.history: list[dict] = []
         self.state = "running"
         self._round = 0
+        self._stop_requested = False
         self.executor = Executor()
         self._build_initial_history()
 
@@ -218,7 +225,10 @@ class SubAgentLoop:
                 await self._run_loop()
         except asyncio.CancelledError:
             logger.info("SubAgent cancelled: %s", self.subagent_id)
-            await self._finish("error", "[取消] 子 agent 已取消")
+            if self._stop_requested:
+                await self._finish("done", "[已停止] 用户终止")
+            else:
+                await self._finish("error", "[取消] 子 agent 已取消")
         except Exception as e:
             logger.exception("SubAgent crashed: %s", self.subagent_id)
             await self._finish("error", f"[异常] {e}")
@@ -228,40 +238,29 @@ class SubAgentLoop:
 
     async def _run_loop(self):
         while True:
-            # 若交互型且在等待用户输入（第一轮后无新消息），阻塞等待
-            # 工作型则持续自主工作，不等待用户
+            # 交互型：首轮直接对话，之后等待用户侧栏输入；
+            # 空闲超时自动收敛，不空转调模型（避免无人对话时持续烧 token）
             if self.kind == "interactive" and self._round > 0:
-                # 检查是否已有 finish 标记
                 rec = _subagents.get(self.subagent_id)
                 if rec and rec.status != "running":
                     break
-                # 等待用户侧栏消息或超时轮询模型（让模型有机会 finish）
-                # 若队列已有消息，drain
-                if self.queue.empty():
-                    # 先让模型基于当前历史生成一次回复（与用户对话）
-                    pass
-                else:
-                    drained = []
-                    while not self.queue.empty():
-                        try:
-                            drained.append(self.queue.get_nowait())
-                        except asyncio.QueueEmpty:
-                            break
-                    for ev in drained:
-                        if ev.get("type") == "user_message":
-                            self.history.append({"role": "user", "content": ev.get("content", "")})
-                    # 收到用户消息后进入下一轮模型调用
-                # 若本轮无用户消息且 history 末尾不是 user，则仍让模型对话一轮
-                # 否则等待
-                if self.queue.empty() and self.history and self.history[-1].get("role") != "user":
-                    # 等待用户输入阻塞
+                # 先 drain 已到达的用户消息
+                while not self.queue.empty():
                     try:
-                        ev = await asyncio.wait_for(self.queue.get(), timeout=120)
+                        ev = self.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if ev.get("type") == "user_message":
+                        self.history.append({"role": "user", "content": ev.get("content", "")})
+                # 无新输入且末尾非 user（模型刚回复过）→ 阻塞等待用户
+                if self.queue.empty() and (not self.history or self.history[-1].get("role") != "user"):
+                    try:
+                        ev = await asyncio.wait_for(self.queue.get(), timeout=_INTERACTIVE_IDLE_TIMEOUT)
                         if ev.get("type") == "user_message":
                             self.history.append({"role": "user", "content": ev.get("content", "")})
                     except TimeoutError:
-                        # 超时未收到用户消息，尝试让模型收敛
-                        pass
+                        await self._finish("done", "[空闲超时] 用户未继续对话，交互型子 agent 自动收敛")
+                        break
 
             # 构造消息并调模型
             messages = self._build_messages()
@@ -372,7 +371,7 @@ class SubAgentLoop:
 
     async def _enqueue_to_main_inner(self, result: str, status: str):
         if self.kind == "interactive":
-            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_queue, self.broadcaster, self.manager_get)
+            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_enqueue, self.broadcaster, self.manager_get)
         else:
             await self._handle_worker_finish(result, status)
 
@@ -382,11 +381,15 @@ class SubAgentLoop:
             res["streamed"] = False
             return res
 
-        # 真实模型流式
+        # 真实模型流式 — 与 heuristic 路径同协议：message.start/delta/done + subagent_id
         tool_set = INTERACTIVE_TOOLS if self.kind == "interactive" else WORKER_TOOLS
         message_id = str(uuid.uuid4())
-        await _broadcast(self.session_id, "subagent.delta" if self.kind == "interactive" else "message.delta", {"agent_id": self.subagent_id, "message_id": message_id, "delta": "", "subagent_id": self.subagent_id}, self.broadcaster)
-        # 沿用 loop 的流式逻辑简化：直接 ainvoke
+        await _broadcast(
+            self.session_id,
+            "message.start",
+            {"agent_id": self.subagent_id, "message_id": message_id, "role": "assistant", "subagent_id": self.subagent_id},
+            self.broadcaster,
+        )
         import json as _json
 
         text_parts: list[str] = []
@@ -396,8 +399,12 @@ class SubAgentLoop:
             delta = getattr(chunk, "content", "") or ""
             if delta:
                 text_parts.append(delta)
-                evt = "subagent.delta" if self.kind == "interactive" else "message.delta"
-                await _broadcast(self.session_id, evt, {"agent_id": self.subagent_id, "message_id": message_id, "delta": delta, "subagent_id": self.subagent_id}, self.broadcaster)
+                await _broadcast(
+                    self.session_id,
+                    "message.delta",
+                    {"agent_id": self.subagent_id, "message_id": message_id, "delta": delta, "subagent_id": self.subagent_id},
+                    self.broadcaster,
+                )
             tc_chunks = getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None)
             if tc_chunks:
                 for tc in tc_chunks:
@@ -412,6 +419,12 @@ class SubAgentLoop:
                         tool_calls_acc[idx]["args"] += tc.args
 
         full_text = "".join(text_parts)
+        await _broadcast(
+            self.session_id,
+            "message.done",
+            {"message_id": message_id, "role": "assistant", "content": full_text, "subagent_id": self.subagent_id},
+            self.broadcaster,
+        )
         # 解析 tool_calls
         tool_calls = []
         for idx in sorted(tool_calls_acc.keys()):
@@ -545,11 +558,11 @@ class SubAgentLoop:
         rec = _subagents.get(self.subagent_id)
         if not rec or not rec.batch_id:
             # 无 batch，直接回投
-            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_queue, self.broadcaster, self.manager_get)
+            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_enqueue, self.broadcaster, self.manager_get)
             return
         batch = _batches.get(rec.batch_id)
         if not batch:
-            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_queue, self.broadcaster, self.manager_get)
+            await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_enqueue, self.broadcaster, self.manager_get)
             return
         batch["results"][self.subagent_id] = {"status": status, "result": result}
         # 原子检查是否全部完成（避免并发时双重回投：先检查再广播，无 await 间隙）
@@ -579,7 +592,7 @@ class SubAgentLoop:
             _batches.pop(rec.batch_id, None)
             # 注入主队列
             try:
-                await self.main_queue.put({"type": "worker_batch_done", "payload": payload})
+                await self.main_enqueue({"type": "worker_batch_done", "payload": payload})
             except Exception as e:
                 logger.debug("Enqueue batch_done failed: %s", e)
             await _broadcast(self.session_id, "worker.batch_done", payload, self.broadcaster)
@@ -593,7 +606,7 @@ class SubAgentLoop:
         await self._enqueue_to_main_inner(result, status)
 
 
-async def _enqueue_to_main_single(session_id: str, subagent_id: str, result: str, status: str, main_queue: asyncio.Queue, broadcaster, manager_get):
+async def _enqueue_to_main_single(session_id: str, subagent_id: str, result: str, status: str, main_enqueue, broadcaster, manager_get):
     rec = _subagents.get(subagent_id)
     late = False
     main_agent = None
@@ -615,11 +628,11 @@ async def _enqueue_to_main_single(session_id: str, subagent_id: str, result: str
         # 主 agent 队列类型：subagent_result 或 worker 单条兼容
         if rec and rec.kind == "worker":
             # 单 worker 无 batch 时也走 batch_done 单条
-            await main_queue.put({"type": "worker_batch_done", "payload": {"batch_id": rec.batch_id or subagent_id, "workers": [payload]}})
+            await main_enqueue({"type": "worker_batch_done", "payload": {"batch_id": rec.batch_id or subagent_id, "workers": [payload]}})
             await _broadcast(session_id, "worker.batch_done", {"batch_id": rec.batch_id or subagent_id, "workers": [payload]}, broadcaster)
         else:
-            await main_queue.put({"type": "subagent_result", "result": result, "subagent_id": subagent_id})
-            await _broadcast(session_id, "subagent.done", {"subagent_id": subagent_id, "kind": rec.kind if rec else "interactive", "result_summary": result[:500]}, broadcaster)
+            # subagent.done 已由 _finish 广播，此处仅注入主 agent 队列
+            await main_enqueue({"type": "subagent_result", "result": result, "subagent_id": subagent_id})
     except Exception as e:
         logger.debug("Enqueue to main failed: %s", e)
 
@@ -633,7 +646,7 @@ async def spawn_interactive(
     main_history: list[dict],
     summary: str | None,
     broadcaster,
-    main_queue: asyncio.Queue,
+    main_enqueue,
     manager_get,
 ) -> str:
     if get_active_count(session_id) >= settings.subagent_max_concurrency:
@@ -651,7 +664,7 @@ async def spawn_interactive(
     )
     _subagents[subagent_id] = rec
     _session_index.setdefault(session_id, set()).add(subagent_id)
-    loop = SubAgentLoop(session_id, subagent_id, "interactive", task_desc, behavior_desc, snapshot, summary, broadcaster, main_queue, manager_get=manager_get)
+    loop = SubAgentLoop(session_id, subagent_id, "interactive", task_desc, behavior_desc, snapshot, summary, broadcaster, main_enqueue, manager_get=manager_get)
     _loops[subagent_id] = loop
     task = asyncio.create_task(loop.run())
     _tasks[subagent_id] = task
@@ -666,7 +679,7 @@ async def spawn_worker_batch(
     main_history: list[dict],
     summary: str | None,
     broadcaster,
-    main_queue: asyncio.Queue,
+    main_enqueue,
     manager_get,
     constraints: str | None = None,
 ) -> str:
@@ -679,7 +692,7 @@ async def spawn_worker_batch(
     batch_id = f"batch_{uuid.uuid4().hex[:8]}"
     snapshot = _snapshot_history(main_history)
     spawned = []
-    _batches[batch_id] = {"workers": [], "results": {}, "done_count": 0, "total": len(tasks)}
+    _batches[batch_id] = {"workers": [], "results": {}, "total": len(tasks)}
     for t in tasks:
         subagent_id = f"wk_{uuid.uuid4().hex[:8]}"
         rec = SubAgentRecord(
@@ -694,7 +707,7 @@ async def spawn_worker_batch(
         _subagents[subagent_id] = rec
         _session_index.setdefault(session_id, set()).add(subagent_id)
         _batches[batch_id]["workers"].append(subagent_id)
-        loop = SubAgentLoop(session_id, subagent_id, "worker", t, constraints or "", snapshot, summary, broadcaster, main_queue, batch_id=batch_id, manager_get=manager_get)
+        loop = SubAgentLoop(session_id, subagent_id, "worker", t, constraints or "", snapshot, summary, broadcaster, main_enqueue, batch_id=batch_id, manager_get=manager_get)
         _loops[subagent_id] = loop
         task_obj = asyncio.create_task(loop.run())
         _tasks[subagent_id] = task_obj
@@ -714,6 +727,30 @@ async def handle_subagent_response(session_id: str, subagent_id: str, content: s
     await loop.enqueue_user(content)
     # 回显子 agent 侧消息
     await _broadcast(session_id, "subagent.message", {"subagent_id": subagent_id, "role": "user", "content": content}, loop.broadcaster)
+    return True
+
+
+async def stop_subagent(subagent_id: str) -> bool:
+    """定向终止子 agent（PLAN §3 agent.stop 对子 agent 的语义）"""
+    loop = _loops.get(subagent_id)
+    rec = _subagents.get(subagent_id)
+    if not loop or not rec or rec.status != "running":
+        return False
+    loop._stop_requested = True
+    # 拒绝该子 agent 的 pending 审批并回收其 shell 进程组
+    for p in gate.list_pending(rec.session_id):
+        if p.agent_id == subagent_id:
+            gate.resolve(p.approval_id, "reject", reason="stopped")
+    try:
+        from app.tools.shell import kill_shell_group
+
+        kill_shell_group(subagent_id)
+    except Exception as e:
+        logger.debug("Kill subagent shell group failed: %s", e)
+    task = _tasks.get(subagent_id)
+    if task and not task.done():
+        task.cancel()
+    logger.info("SubAgent stopped by user: %s session=%s", subagent_id, rec.session_id)
     return True
 
 

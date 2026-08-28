@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("harness.gate")
 
@@ -16,7 +16,7 @@ class PendingApproval:
     tool: str
     args: dict
     reason: str
-    future: asyncio.Future = field(default_factory=asyncio.Future)
+    future: asyncio.Future  # 由 request_approval 在运行中的事件循环内创建
     decision: str | None = None  # approved_once | approved_similar | rejected | timeout | blocked
 
 

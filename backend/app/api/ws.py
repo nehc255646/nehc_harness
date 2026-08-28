@@ -21,14 +21,15 @@ _connections: dict[str, set[WebSocket]] = {}
 
 
 async def broadcast(session_id: str, event: str, payload: dict):
-    """向该会话所有连接广播"""
+    """向该会话所有连接并行广播（单连接慢/死不阻塞其他连接）"""
     conns = _connections.get(session_id, set()).copy()
+    if not conns:
+        return
     msg = json.dumps({"event": event, "payload": payload}, ensure_ascii=False)
-    for ws in conns:
-        try:
-            await ws.send_text(msg)
-        except Exception as e:
-            logger.debug("Broadcast send failed: %s", e)
+    results = await asyncio.gather(*(ws.send_text(msg) for ws in conns), return_exceptions=True)
+    for ws, r in zip(conns, results):
+        if isinstance(r, BaseException):
+            logger.debug("Broadcast send failed: %s", r)
 
 
 # 供 AgentLoop 回调
@@ -139,12 +140,24 @@ async def ws_endpoint(ws: WebSocket):
 
             elif event == "agent.stop":
                 sid = payload.get("agent_id", session_id) if isinstance(payload.get("agent_id"), str) else session_id
-                # agent_id 在 M1 即 session_id
-                target = manager.get(sid) or manager.get(session_id)
+                # 先查主 agent，再查子 agent（工作型可被 agent.stop 定向终止），最后兜底当前会话主 agent
+                target = manager.get(sid)
                 if target:
                     await target.stop()
                 else:
-                    await ws.send_text(json.dumps({"event": "agent.state", "payload": {"agent_id": sid, "state": "done"}}))
+                    try:
+                        from app.agent.subagent import stop_subagent
+
+                        ok = await stop_subagent(sid)
+                    except Exception:
+                        logger.exception("Subagent stop failed")
+                        ok = False
+                    if not ok:
+                        main = manager.get(session_id)
+                        if main:
+                            await main.stop()
+                        else:
+                            await ws.send_text(json.dumps({"event": "agent.state", "payload": {"agent_id": sid, "state": "done"}}))
 
             elif event == "session.create":
                 new_id = str(uuid.uuid4())

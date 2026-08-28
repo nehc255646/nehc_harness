@@ -26,3 +26,22 @@ def test_path_escape_rejected():
     assert "越权" in write.invoke({"path": "../escape.txt", "content": "x"})
     assert "越权" in glob.invoke({"pattern": "../**/*"})
     assert "越权" in grep.invoke({"pattern": "root", "path": "../etc/passwd"})
+
+
+def test_glob_embedded_traversal_filtered():
+    # 内嵌 ../ 的模式不允许枚举 WORKDIR 外文件（即使不以 ../ 开头）
+    sub = f"sub_{uuid.uuid4().hex[:8]}"
+    assert "已写入" in write.invoke({"path": f"{sub}/inner.txt", "content": "x"})
+    try:
+        # sub/../.. 回到 WORKDIR 上一级（项目根），README.md 存在 — 必须被过滤
+        r = glob.invoke({"pattern": f"{sub}/../../README.md"})
+        assert r == "(无匹配)"
+        # 正常子目录匹配不受影响
+        r2 = glob.invoke({"pattern": f"{sub}/*.txt"})
+        assert f"{sub}/inner.txt" in r2
+    finally:
+        import shutil
+
+        from app.tools.files import _workdir
+
+        shutil.rmtree(_workdir() / sub, ignore_errors=True)

@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # Security
-    encryption_key: str = "Fai5ivmUmRw2LvpEMDBbxzHiVBAVSnTS8A5QP1akHuo="
+    # Security — 必须由 .env 提供（Fernet 生成命令见 .env.example），留空时启动告警
+    encryption_key: str = ""
 
     # Server
     host: str = "0.0.0.0"
