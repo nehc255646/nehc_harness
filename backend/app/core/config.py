@@ -1,4 +1,4 @@
-"""全量配置 — 对应 PLAN.md §10"""
+"""全量配置"""
 
 from urllib.parse import quote_plus
 

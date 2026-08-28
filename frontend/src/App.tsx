@@ -6,28 +6,83 @@ import SessionSidebar from "./components/SessionSidebar";
 import SubAgentPanel from "./components/subagent/SubAgentPanel";
 import WorkerStatus from "./components/subagent/WorkerStatus";
 import AccentPicker from "./components/AccentPicker";
+import { IconMenu, IconSettings, IconStop } from "./components/icons";
+
+const STATE_LABEL: Record<string, string> = {
+  idle: "空闲",
+  running: "运行中",
+  awaiting_approval: "待审批",
+  done: "完成",
+  error: "出错",
+};
+
+const CONN_LABEL: Record<string, string> = {
+  connected: "已连接",
+  connecting: "连接中",
+  disconnected: "已断开",
+  error: "连接失败",
+};
 
 export default function App() {
-  const { boot, connectionState, models, modelId, setSessionModel, refreshModels, agentState, stopAgent } = useAgentStore();
+  const {
+    boot,
+    connectionState,
+    models,
+    modelId,
+    setSessionModel,
+    refreshModels,
+    agentState,
+    stopAgent,
+    sessionTitle,
+    sessionId,
+    sessionRows,
+  } = useAgentStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const busy = agentState === "running" || agentState === "awaiting_approval";
+  const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Agent Harness";
 
   useEffect(() => {
     boot();
   }, [boot]);
 
   return (
-    <div className="flex h-screen bg-bg text-white">
-      <SessionSidebar />
-      <div className="flex flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3">
-          <h1 className="text-sm font-semibold tracking-wide">
-            Agent <span className="text-accent">Harness</span>
-          </h1>
-          <div className="flex items-center gap-3">
-            <AccentPicker />
+    <div className="flex h-screen overflow-hidden bg-bg text-[var(--color-text)]">
+      <SessionSidebar mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] bg-surface/80 px-3 backdrop-blur sm:px-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-white md:hidden"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="打开会话列表"
+            >
+              <IconMenu />
+            </button>
+            <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold tracking-tight">{heading}</h1>
+            <p className="flex items-center gap-1.5 text-[11px] text-faint">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  connectionState === "connected"
+                    ? "bg-accent shadow-[0_0_6px_var(--color-accent-glow)]"
+                    : connectionState === "connecting"
+                      ? "bg-amber-400"
+                      : "bg-red-500"
+                }`}
+              />
+              {STATE_LABEL[agentState] || agentState}
+              <span className="text-[var(--color-border-strong)]">·</span>
+              {CONN_LABEL[connectionState] || connectionState}
+            </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-nowrap items-center gap-2">
+            <div className="hidden sm:block">
+              <AccentPicker />
+            </div>
             <select
-              className="max-w-56 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs outline-none focus:border-accent"
+              className="ui-input max-w-[8.5rem] shrink-0 py-1.5 text-xs sm:max-w-52"
               value={modelId ?? ""}
               onChange={(e) => setSessionModel(e.target.value ? Number(e.target.value) : null)}
             >
@@ -38,25 +93,24 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <button onClick={() => setSettingsOpen(true)} className="text-xs text-accent hover:underline">
-              模型
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="ui-btn-ghost shrink-0 whitespace-nowrap px-2"
+              title="模型与供应商"
+            >
+              <IconSettings className="h-4 w-4" />
+              <span className="hidden lg:inline">模型</span>
             </button>
             {busy && (
-              <button
-                onClick={() => stopAgent()}
-                className="rounded border border-red-800 px-2 py-1 text-xs text-red-300 hover:bg-red-950"
-              >
+              <button onClick={() => stopAgent()} className="ui-btn shrink-0 gap-1 whitespace-nowrap border border-red-500/30 bg-red-950/40 px-2.5 text-xs text-red-300 hover:bg-red-950/70">
+                <IconStop />
                 停止
               </button>
             )}
-            <span
-              className={`h-2 w-2 rounded-full ${connectionState === "connected" ? "bg-accent shadow-[0_0_8px_var(--color-accent-glow)]" : connectionState === "connecting" ? "bg-yellow-400" : "bg-red-500"}`}
-              title={connectionState}
-            />
           </div>
         </header>
-        <div className="flex flex-1 overflow-hidden">
-          <div className="flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <div className="min-w-0 flex-1 overflow-hidden">
             <Chat />
           </div>
           <SubAgentPanel />

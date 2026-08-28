@@ -1,8 +1,8 @@
 export const ACCENTS = {
-  cyan: { label: "青", accent: "#22D3EE", hover: "#06B6D4", fg: "#000000", dim: "rgba(34,211,238,0.18)", glow: "rgba(34,211,238,0.55)" },
-  emerald: { label: "绿", accent: "#34D399", hover: "#10B981", fg: "#000000", dim: "rgba(52,211,153,0.18)", glow: "rgba(52,211,153,0.55)" },
-  violet: { label: "紫", accent: "#A78BFA", hover: "#8B5CF6", fg: "#000000", dim: "rgba(167,139,250,0.18)", glow: "rgba(167,139,250,0.55)" },
-  amber: { label: "琥珀", accent: "#FBBF24", hover: "#F59E0B", fg: "#000000", dim: "rgba(251,191,36,0.18)", glow: "rgba(251,191,36,0.55)" },
+  cyan: { label: "青", accent: "#22D3EE", hover: "#06B6D4", fg: "#041014", dim: "rgba(34,211,238,0.14)", glow: "rgba(34,211,238,0.45)" },
+  emerald: { label: "绿", accent: "#34D399", hover: "#10B981", fg: "#04140e", dim: "rgba(52,211,153,0.14)", glow: "rgba(52,211,153,0.45)" },
+  violet: { label: "紫", accent: "#A78BFA", hover: "#8B5CF6", fg: "#120a22", dim: "rgba(167,139,250,0.14)", glow: "rgba(167,139,250,0.45)" },
+  amber: { label: "琥珀", accent: "#FBBF24", hover: "#F59E0B", fg: "#1a1203", dim: "rgba(251,191,36,0.14)", glow: "rgba(251,191,36,0.45)" },
 } as const;
 
 export type AccentId = keyof typeof ACCENTS;

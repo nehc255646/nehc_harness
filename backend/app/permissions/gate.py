@@ -1,4 +1,4 @@
-"""per-agent 审批挂起/恢复 (Future + 超时) — 对应 PLAN.md §2.2"""
+"""per-agent 审批挂起/恢复 (Future + 超时)"""
 
 import asyncio
 import logging

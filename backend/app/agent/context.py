@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
 
 
 def build_messages(system: str, summary: str | None, window_messages: list, pending: list) -> list:
-    """注入顺序：system + 摘要 + 窗口消息 + 本轮 — PLAN.md §2.3"""
+    """注入顺序：system + 摘要 + 窗口消息 + 本轮"""
     messages = [{"role": "system", "content": system}]
     if summary:
         messages.append({"role": "system", "content": f"[摘要]\n{summary}"})

@@ -51,21 +51,25 @@ export default function CodeDiff({ diff }: { diff: FileDiff }) {
     return null;
   }
   return (
-    <div className="mt-2 overflow-x-auto rounded border border-zinc-800 bg-zinc-950">
-      {diff.path && <div className="border-b border-zinc-800 px-2 py-1 font-mono text-[10px] text-zinc-500">{diff.path}</div>}
-      <pre className="max-h-64 overflow-y-auto p-1 text-[11px] leading-5">
+    <div className="mt-2 overflow-hidden rounded-lg border border-[var(--color-border)] bg-black/30">
+      {diff.path && (
+        <div className="border-b border-[var(--color-border)] px-3 py-1.5 font-mono text-[11px] text-muted">{diff.path}</div>
+      )}
+      <pre className="max-h-64 overflow-auto py-1 font-mono text-[11px] leading-5">
         {rows.map((r, idx) => (
           <div
             key={idx}
             className={
               r.type === "del"
-                ? "bg-red-950/50 text-red-300"
+                ? "bg-red-500/10 text-red-300"
                 : r.type === "add"
-                  ? "bg-emerald-950/40 text-emerald-300"
-                  : "text-zinc-400"
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "text-zinc-500"
             }
           >
-            <span className="inline-block w-4 select-none text-zinc-600">{r.type === "del" ? "-" : r.type === "add" ? "+" : " "}</span>
+            <span className="inline-block w-6 select-none text-center text-faint">
+              {r.type === "del" ? "−" : r.type === "add" ? "+" : " "}
+            </span>
             {r.text || " "}
           </div>
         ))}

@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
 import { rest, type ModelRow, type ProviderRow } from "../api/rest";
+import { IconClose } from "./icons";
 
-export default function ModelSettings({ open, onClose, onChanged }: { open: boolean; onClose: () => void; onChanged: () => void }) {
+export default function ModelSettings({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [defaultId, setDefaultId] = useState<number | null>(null);
@@ -45,27 +54,33 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-accent">模型与供应商</h2>
-          <button onClick={onClose} className="text-xs text-zinc-400 hover:text-white">
-            关闭
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-surface p-5 shadow-panel"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold">模型与供应商</h2>
+            <p className="mt-0.5 text-xs text-faint">OpenAI 兼容接口，密钥加密存库</p>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-white">
+            <IconClose />
           </button>
         </div>
-        {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
-        {testMsg && <p className="mb-2 text-xs text-zinc-300">{testMsg}</p>}
+        {err && <p className="mb-3 rounded-lg bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
+        {testMsg && <p className="mb-3 rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted">{testMsg}</p>}
 
-        <section className="mb-4 space-y-2">
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500">新建供应商</h3>
+        <section className="mb-5">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">新建供应商</h3>
           <div className="grid grid-cols-2 gap-2">
-            <input placeholder="slug (openai)" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={form.provider_id} onChange={(e) => setForm({ ...form, provider_id: e.target.value })} />
-            <input placeholder="显示名" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} />
-            <input placeholder="base_url" className="col-span-2 rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
-            <input placeholder="api_key" type="password" className="col-span-2 rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
+            <input placeholder="slug（如 openai）" className="ui-input text-xs" value={form.provider_id} onChange={(e) => setForm({ ...form, provider_id: e.target.value })} />
+            <input placeholder="显示名" className="ui-input text-xs" value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} />
+            <input placeholder="base_url" className="ui-input col-span-2 text-xs" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
+            <input placeholder="api_key" type="password" className="ui-input col-span-2 text-xs" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
           </div>
           <button
-            className="rounded bg-accent px-3 py-1 text-xs text-accent-fg"
+            className="ui-btn-primary mt-2 text-xs"
             onClick={async () => {
               setErr("");
               try {
@@ -82,43 +97,45 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
           </button>
         </section>
 
-        <section className="mb-4 space-y-2">
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500">供应商</h3>
-          {providers.map((p) => (
-            <div key={p.id} className="flex items-center justify-between rounded border border-zinc-800 px-2 py-1 text-xs">
-              <span>
-                {p.display_name} <span className="text-zinc-500">({p.provider_id})</span>
-              </span>
-              <div className="flex gap-2">
-                <button
-                  className="text-accent"
-                  onClick={async () => {
-                    const r = await rest.testProvider(p.id);
-                    setTestMsg(r.ok ? `hello ok: ${r.reply || ""}` : `hello 失败: ${r.error || ""}（仍可保存）`);
-                  }}
-                >
-                  hello 探测
-                </button>
-                <button
-                  className="text-red-400"
-                  onClick={async () => {
-                    await rest.deleteProvider(p.id);
-                    await reload();
-                    onChanged();
-                  }}
-                >
-                  删除
-                </button>
+        <section className="mb-5">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">供应商</h3>
+          <div className="space-y-1.5">
+            {providers.map((p) => (
+              <div key={p.id} className="flex items-center justify-between rounded-xl border border-[var(--color-border)] bg-surface-2 px-3 py-2 text-xs">
+                <span>
+                  {p.display_name} <span className="text-faint">({p.provider_id})</span>
+                </span>
+                <div className="flex gap-3">
+                  <button
+                    className="text-accent hover:underline"
+                    onClick={async () => {
+                      const r = await rest.testProvider(p.id);
+                      setTestMsg(r.ok ? `hello ok: ${r.reply || ""}` : `hello 失败: ${r.error || ""}（仍可保存）`);
+                    }}
+                  >
+                    hello 探测
+                  </button>
+                  <button
+                    className="text-red-400 hover:underline"
+                    onClick={async () => {
+                      await rest.deleteProvider(p.id);
+                      await reload();
+                      onChanged();
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
-          {providers.length === 0 && <p className="text-xs text-zinc-600">暂无供应商。未配置时走 heuristic 演示。</p>}
+            ))}
+          </div>
+          {providers.length === 0 && <p className="text-xs text-faint">暂无供应商。未配置时走 heuristic 演示。</p>}
         </section>
 
-        <section className="mb-4 space-y-2">
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500">新建模型</h3>
+        <section className="mb-5">
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">新建模型</h3>
           <div className="grid grid-cols-2 gap-2">
-            <select className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={modelForm.providerId} onChange={(e) => setModelForm({ ...modelForm, providerId: Number(e.target.value) })}>
+            <select className="ui-input text-xs" value={modelForm.providerId} onChange={(e) => setModelForm({ ...modelForm, providerId: Number(e.target.value) })}>
               <option value={0}>选择供应商</option>
               {providers.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -126,12 +143,12 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
                 </option>
               ))}
             </select>
-            <input placeholder="model_id" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={modelForm.model_id} onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })} />
-            <input placeholder="显示名" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={modelForm.display_name} onChange={(e) => setModelForm({ ...modelForm, display_name: e.target.value })} />
-            <input placeholder="context_window" type="number" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={modelForm.context_window} onChange={(e) => setModelForm({ ...modelForm, context_window: Number(e.target.value) })} />
+            <input placeholder="model_id" className="ui-input text-xs" value={modelForm.model_id} onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })} />
+            <input placeholder="显示名" className="ui-input text-xs" value={modelForm.display_name} onChange={(e) => setModelForm({ ...modelForm, display_name: e.target.value })} />
+            <input placeholder="context_window" type="number" className="ui-input text-xs" value={modelForm.context_window} onChange={(e) => setModelForm({ ...modelForm, context_window: Number(e.target.value) })} />
           </div>
           <button
-            className="rounded bg-accent px-3 py-1 text-xs text-accent-fg"
+            className="ui-btn-primary mt-2 text-xs"
             onClick={async () => {
               if (!modelForm.providerId) return setErr("请选择供应商");
               try {
@@ -151,37 +168,44 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
           </button>
         </section>
 
-        <section className="space-y-2">
-          <h3 className="text-xs uppercase tracking-wide text-zinc-500">模型（当前兜底: {defaultId ?? "未设"}）</h3>
-          {models.map((m) => (
-            <div key={m.id} className="flex items-center justify-between rounded border border-zinc-800 px-2 py-1 text-xs">
-              <span>
-                {m.display_name} <span className="text-zinc-500">{m.provider_name} / {m.model_id}</span>
-              </span>
-              <div className="flex gap-2">
-                <button
-                  className="text-accent"
-                  onClick={async () => {
-                    await rest.putDefaultModel(m.id);
-                    await reload();
-                    onChanged();
-                  }}
-                >
-                  设为兜底
-                </button>
-                <button
-                  className="text-red-400"
-                  onClick={async () => {
-                    await rest.deleteModel(m.id);
-                    await reload();
-                    onChanged();
-                  }}
-                >
-                  删除
-                </button>
+        <section>
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">
+            模型 · 当前兜底 {defaultId ?? "未设"}
+          </h3>
+          <div className="space-y-1.5">
+            {models.map((m) => (
+              <div key={m.id} className="flex items-center justify-between rounded-xl border border-[var(--color-border)] bg-surface-2 px-3 py-2 text-xs">
+                <span>
+                  {m.display_name}{" "}
+                  <span className="text-faint">
+                    {m.provider_name} / {m.model_id}
+                  </span>
+                </span>
+                <div className="flex gap-3">
+                  <button
+                    className="text-accent hover:underline"
+                    onClick={async () => {
+                      await rest.putDefaultModel(m.id);
+                      await reload();
+                      onChanged();
+                    }}
+                  >
+                    设为兜底
+                  </button>
+                  <button
+                    className="text-red-400 hover:underline"
+                    onClick={async () => {
+                      await rest.deleteModel(m.id);
+                      await reload();
+                      onChanged();
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </section>
       </div>
     </div>

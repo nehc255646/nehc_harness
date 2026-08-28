@@ -1,4 +1,4 @@
-"""手写 asyncio loop — 对应 PLAN.md §2.1"""
+"""手写 asyncio loop"""
 
 import asyncio
 import json

@@ -1,4 +1,4 @@
-/** WebSocket 客户端封装 — 对应 PLAN.md §3 协议 */
+/** WebSocket 客户端封装 */
 
 export type WSEvent = {
   event: string;

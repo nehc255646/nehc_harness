@@ -1,14 +1,59 @@
+import { IconShield } from "./icons";
+
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
 
-export default function ApprovalModal({ approval, onRespond }: { approval: Approval; onRespond: (id: string, d: "approve" | "approve_similar" | "reject") => void }) {
+export default function ApprovalModal({
+  approval,
+  onRespond,
+}: {
+  approval: Approval;
+  onRespond: (id: string, d: "approve" | "approve_similar" | "reject") => void;
+}) {
+  const detail =
+    approval.reason ||
+    (() => {
+      try {
+        return JSON.stringify(approval.args, null, 2);
+      } catch {
+        return String(approval.args);
+      }
+    })();
+
   return (
-    <div className="mx-4 mb-2 rounded-lg border border-yellow-600/50 bg-yellow-950/30 p-3">
-      <p className="text-sm text-yellow-200">审批请求: <span className="font-mono text-accent">{approval.tool}</span></p>
-      <p className="text-xs text-zinc-400 mt-1">{approval.reason || JSON.stringify(approval.args)}</p>
-      <div className="mt-3 flex gap-2">
-        <button onClick={() => onRespond(approval.approval_id, "approve")} className="rounded bg-accent px-3 py-1 text-xs text-accent-fg">执行一次</button>
-        <button onClick={() => onRespond(approval.approval_id, "approve_similar")} className="rounded border border-accent px-3 py-1 text-xs text-accent">同类均执行</button>
-        <button onClick={() => onRespond(approval.approval_id, "reject")} className="rounded bg-zinc-800 px-3 py-1 text-xs text-zinc-300">拒绝</button>
+    <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-950/25 p-4 shadow-panel">
+      <div className="flex items-start gap-3">
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-amber-500/15 text-amber-300">
+          <IconShield />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-amber-100">
+            需要审批
+            <span className="ml-2 font-mono text-xs text-accent">{approval.tool}</span>
+          </p>
+          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded-lg bg-black/30 px-3 py-2 font-mono text-[11px] leading-5 text-zinc-300">
+            {detail}
+          </pre>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={() => onRespond(approval.approval_id, "approve")}
+              className="ui-btn-primary text-xs"
+            >
+              执行一次
+            </button>
+            <button
+              onClick={() => onRespond(approval.approval_id, "approve_similar")}
+              className="ui-btn-ghost text-xs text-accent hover:text-white"
+            >
+              本次会话同类均执行
+            </button>
+            <button
+              onClick={() => onRespond(approval.approval_id, "reject")}
+              className="ui-btn-ghost text-xs hover:border-red-500/40 hover:text-red-300"
+            >
+              拒绝
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

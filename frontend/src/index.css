@@ -5,19 +5,81 @@
 :root {
   --color-accent: #22d3ee;
   --color-accent-hover: #06b6d4;
-  --color-accent-fg: #000000;
-  --color-accent-dim: rgba(34, 211, 238, 0.18);
-  --color-accent-glow: rgba(34, 211, 238, 0.55);
-  --color-bg: #0a0a0a;
+  --color-accent-fg: #041014;
+  --color-accent-dim: rgba(34, 211, 238, 0.14);
+  --color-accent-glow: rgba(34, 211, 238, 0.45);
+  --color-bg: #08090c;
+  --color-surface: #0d0f14;
+  --color-surface-2: #13161d;
+  --color-border: rgba(255, 255, 255, 0.07);
+  --color-border-strong: rgba(255, 255, 255, 0.12);
+  --color-text: #eceff4;
+  --color-muted: #9aa3b2;
+  --color-faint: #6b7382;
 }
 
 html,
 body,
 #root {
+  height: 100%;
   background: var(--color-bg);
+  color: var(--color-text);
+  font-family: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-image:
+    radial-gradient(900px 420px at 12% -8%, var(--color-accent-dim), transparent 58%),
+    radial-gradient(700px 360px at 88% 0%, rgba(255, 255, 255, 0.03), transparent 50%);
+  background-attachment: fixed;
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #333 var(--color-bg);
+  scrollbar-color: #2a2f3a transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #2a2f3a;
+  border-radius: 999px;
+}
+
+@layer components {
+  .ui-input {
+    @apply w-full rounded-lg border bg-surface-2 px-3 py-2 text-sm text-[var(--color-text)] outline-none transition;
+    border-color: var(--color-border);
+  }
+  .ui-input:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-dim);
+  }
+  .ui-input:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+  .ui-btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition;
+  }
+  .ui-btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg transition hover:bg-accent-hover disabled:opacity-50;
+  }
+  .ui-btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border bg-transparent px-3 py-1.5 text-sm font-medium text-[var(--color-muted)] transition hover:text-white;
+    border-color: var(--color-border);
+  }
+  .ui-btn-ghost:hover {
+    background: var(--color-surface-2);
+    border-color: var(--color-border-strong);
+  }
+  .ui-card {
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    border-radius: 0.85rem;
+  }
 }

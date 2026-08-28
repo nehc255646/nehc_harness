@@ -1,4 +1,4 @@
-"""Redis 实时层 — PLAN.md M4
+"""Redis 实时层
 
 权威在内存 AgentManager / ApprovalGate 与 MySQL；Redis 镜像：
 - agent 状态 TTL（过期不代表结束）

@@ -1,4 +1,4 @@
-"""错误码定义 — 对应 PLAN.md §3 Server→Client error codes"""
+"""错误码定义"""
 
 from enum import Enum
 

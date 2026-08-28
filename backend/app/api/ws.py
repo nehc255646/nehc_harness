@@ -1,4 +1,4 @@
-"""WebSocket 端点 — 对应 PLAN.md §3 协议 + M1 完整版"""
+"""WebSocket 端点"""
 
 import asyncio
 import json

@@ -1,4 +1,4 @@
-"""规则解析与前缀匹配 — 对应 PLAN.md §2.2"""
+"""规则解析与前缀匹配"""
 
 import re
 from pathlib import Path

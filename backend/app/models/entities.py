@@ -1,4 +1,4 @@
-"""MySQL ORM — 对应 PLAN.md §4"""
+"""MySQL ORM"""
 
 from __future__ import annotations
 

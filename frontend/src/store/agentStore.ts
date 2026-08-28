@@ -87,7 +87,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("connection", (p) => set({ connectionState: p.state as State["connectionState"] }));
 
   wsClient.on("session.hello", (p) => {
-    // 断线恢复对账 — PLAN.md §2.5；新会话 (session 变化) 时清空展示
+    // 断线恢复对账；新会话时清空展示
     const sid2 = p.session_id as string;
     wsClient.setSession(sid2);
     set((s) => {

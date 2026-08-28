@@ -1,4 +1,4 @@
-"""MySQL 落库 + 内存待写队列兜底 — PLAN.md M3
+"""MySQL 落库 + 内存待写队列兜底
 
 落库点：message.done / 用户消息 / tool.result；失败入队，loop drain 时补写。
 """
