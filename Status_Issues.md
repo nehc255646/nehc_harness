@@ -32,5 +32,14 @@
 - D2 补测试 21 项：`test_rules` 黑名单拆分/`test_policy` 四路分流/`test_context` 截断/`test_files` 越权 + 读写往返/`test_ws` 审批三选与黑名单拦截（`TestClient`）
 - 验证：`ruff`/`tsc --noEmit`/`eslint`/`pytest 21 passed` 均通过
 
-## 待办 M2
-- spawn_subagent/spawn_worker 快照/隔离/回投
+## M2 — 子 agent (已完成 2026-08-28)
+- 交互型 `spawn_subagent`：快照(精简历史+behavior_desc+任务) → 隔离上下文+独立 task → 侧栏面板 `subagent.opened` → 仅 `finish_subagent` 工具，不走用户门 → 独立 Queue 收 `subagent.response` → `finish_subagent` 异步回投主队列 → 销毁；主 done 后标 late
+- 工作型 `spawn_worker`/`spawn_workers`：同快照逻辑，后台并发，与主 agent 同等工具/审批(会话级共享 allow_rules) → `worker.status` 列表推送 → `finish_worker` 或 MAX_ROUNDS/WORKER_TIMEOUT(600s) 触顶 → 按 `batch_id` 暂存，同一批全部结束后在主 agent 首个节点边界以单条 `worker.batch_done` 聚合注入；并发共享池 SUBAGENT_MAX_CONCURRENCY=3，单轮 ≤2，防全量转包(工具描述+WORKER_SYSTEM_PROMPT双约束)，暂不支持递归；error/超时按完成随批量回投
+- 快照裁剪复用 `context.build_messages` + `window_n` 窗口；隔离为冻结快照，不共享可变状态
+- 后端：`agent/subagent.py` 完整实现(Interactive/Worker 两类 loop、快照/隔离/回投/批量聚合/并发限流/超时)、`tools/subagent_tool.py`/`worker_tool.py` 注册、`agent/loop.py` 支持 spawn_* 分发(不走 policy，直接执行)+`worker_batch_done`/`subagent_result` 回投处理+回投消息去重防无限递归、`agent/prompts.py` 新增 `INTERACTIVE_SYSTEM_PROMPT`/`WORKER_SYSTEM_PROMPT`、`api/ws.py` 补 `subagent.response` 转发+`hello` 带 `subagent_panels/workers` 对账
+- 前端：`store/agentStore.ts` 增加 `subPanels/workers` + `sendSubagentMessage` + 事件处理(`subagent.opened/done/worker.status/batch_done/subagent.message`)、`SubAgentPanel.tsx` 侧栏交互(输入+状态+迟到标记)、`WorkerStatus.tsx` 后台列表(青色指示)、`api/ws.ts` 已支持 ping/pong
+- 修复：工作型批量聚合并发双重回投竞态(先检查长度再清批，无 await 间隙)、`loop` heuristic 对回投聚合消息去重(避免批量触发新派生)、派生优先级提升至 shell 之前
+- 验证：`ruff`/`tsc --noEmit`/`eslint`/`pytest 21 passed`/`vite build` 通过；WS 脚本验证 交互型派生→侧栏对话→结果异步回投→主 agent 消费，工作型派生→后台并发→`worker.status` 可观测→`worker.batch_done` 聚合回投，约束生效(单轮≤2、总并发≤3)
+
+## 待办 M3
+- SQLAlchemy + Alembic + MySQL 持久化 + Provider/Model 分组 + 会话续聊

@@ -1,9 +1,11 @@
 import { create } from "zustand";
 import { wsClient } from "../api/ws";
 
-type Message = { id: string; role: string; content: string; streaming?: boolean };
+type Message = { id: string; role: string; content: string; streaming?: boolean; subagent_id?: string };
 type ToolCall = { call_id: string; name: string; args: unknown; result?: unknown };
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
+type SubPanel = { subagent_id: string; kind: string; task: string; status: string; result?: string };
+type WorkerItem = { subagent_id: string; task_summary: string; state: string; batch_id?: string };
 
 type State = {
   messages: Message[];
@@ -13,7 +15,10 @@ type State = {
   connectionState: "connecting" | "connected" | "disconnected" | "error";
   sessionId: string;
   sessions: string[];
+  subPanels: SubPanel[];
+  workers: WorkerItem[];
   sendMessage: (content: string) => void;
+  sendSubagentMessage: (subagent_id: string, content: string) => void;
   respondApproval: (approval_id: string, decision: "approve" | "approve_similar" | "reject") => void;
   connect: (sessionId?: string) => void;
 };
@@ -26,6 +31,8 @@ export const useAgentStore = create<State>((set, get) => ({
   connectionState: "connecting",
   sessionId: "default",
   sessions: ["default"],
+  subPanels: [],
+  workers: [],
 
   connect: (sessionId) => {
     const sid = sessionId || get().sessionId;
@@ -45,6 +52,8 @@ export const useAgentStore = create<State>((set, get) => ({
         toolCalls: sid2 === s.sessionId ? s.toolCalls : [],
         pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
+        subPanels: Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels,
+        workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
       }));
     });
 
@@ -89,6 +98,39 @@ export const useAgentStore = create<State>((set, get) => ({
     wsClient.on("approval.resolved", (p) =>
       set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== p.approval_id) })),
     );
+    wsClient.on("subagent.opened", (p) => {
+      const panel = p as unknown as SubPanel;
+      // interactive 侧栏，worker 忽略（由 worker.status 展示）
+      if (panel.kind === "interactive") {
+        set((s) => ({ subPanels: [...s.subPanels.filter((x) => x.subagent_id !== panel.subagent_id), panel as SubPanel] }));
+      }
+    });
+    wsClient.on("subagent.done", (p) => {
+      const sid = p.subagent_id as string;
+      const result = p.result_summary as string;
+      set((s) => ({
+        subPanels: s.subPanels.map((x) => (x.subagent_id === sid ? { ...x, status: "done", result } : x)),
+      }));
+    });
+    wsClient.on("worker.status", (p) => {
+      const workers = (p.workers as WorkerItem[]) || [];
+      set({ workers });
+    });
+    wsClient.on("worker.batch_done", (p) => {
+      // 批量完成已通过主 agent 消息注入上下文，此处仅刷新 workers
+      const batchId = p.batch_id as string;
+      set((s) => ({
+        workers: s.workers.map((w) => (w.batch_id === batchId ? { ...w, state: "done" } : w)),
+      }));
+    });
+    wsClient.on("subagent.message", (p) => {
+      const sid = p.subagent_id as string;
+      const content = p.content as string;
+      const role = p.role as string;
+      set((s) => ({
+        messages: [...s.messages, { id: `sub-${sid}-${Date.now()}`, role: role === "user" ? "user(sub)" : "assistant(sub)", content: `[${sid}] ${content}` }],
+      }));
+    });
   },
 
   sendMessage: (content) => {
@@ -101,5 +143,11 @@ export const useAgentStore = create<State>((set, get) => ({
 
   respondApproval: (approval_id, decision) => {
     wsClient.send("approval.response", { approval_id, decision });
+  },
+  sendSubagentMessage: (subagent_id, content) => {
+    const sid = get().sessionId;
+    wsClient.send("subagent.response", { session_id: sid, subagent_id, content });
+    // 本地回显
+    set((s) => ({ messages: [...s.messages, { id: `local-sub-${Date.now()}`, role: "user(sub)", content: `[->${subagent_id}] ${content}` }] }));
   },
 }));

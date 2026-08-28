@@ -58,6 +58,14 @@ async def ws_endpoint(ws: WebSocket):
         for p in gate.list_pending(session_id)
     ]
     session_rules = gate.get_session_rules(session_id)
+    try:
+        from app.agent.subagent import get_panels, get_workers
+
+        panels = get_panels(session_id)
+        workers = get_workers(session_id)
+    except Exception:
+        panels = []
+        workers = []
     await ws.send_text(
         json.dumps(
             {
@@ -68,7 +76,8 @@ async def ws_endpoint(ws: WebSocket):
                     "agent_state": agent.state,
                     "pending_approvals": pending,
                     "session_allow_rules": session_rules,
-                    "subagent_panels": [],
+                    "subagent_panels": panels,
+                    "workers": workers,
                 },
             },
             ensure_ascii=False,
@@ -158,6 +167,7 @@ async def ws_endpoint(ws: WebSocket):
                                 "pending_approvals": [],
                                 "session_allow_rules": [],
                                 "subagent_panels": [],
+                                "workers": [],
                             },
                         },
                         ensure_ascii=False,
@@ -180,6 +190,14 @@ async def ws_endpoint(ws: WebSocket):
                     for p in gate.list_pending(session_id)
                 ]
                 rules = gate.get_session_rules(session_id)
+                try:
+                    from app.agent.subagent import get_panels, get_workers
+
+                    panels = get_panels(session_id)
+                    workers = get_workers(session_id)
+                except Exception:
+                    panels = []
+                    workers = []
                 await ws.send_text(
                     json.dumps(
                         {
@@ -190,12 +208,25 @@ async def ws_endpoint(ws: WebSocket):
                                 "agent_state": new_agent.state,
                                 "pending_approvals": pending,
                                 "session_allow_rules": rules,
-                                "subagent_panels": [],
+                                "subagent_panels": panels,
+                                "workers": workers,
                             },
                         },
                         ensure_ascii=False,
                     )
                 )
+
+            elif event == "subagent.response":
+                subagent_id = payload.get("subagent_id", "")
+                content = payload.get("content", "")
+                try:
+                    from app.agent.subagent import handle_subagent_response
+
+                    ok = await handle_subagent_response(session_id, subagent_id, content)
+                    if not ok:
+                        await ws.send_text(json.dumps({"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": f"subagent {subagent_id} 不存在"}}))
+                except Exception as e:
+                    await ws.send_text(json.dumps({"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": str(e)}}))
 
             else:
                 logger.debug("WS unknown event: %s payload=%s", event, payload)

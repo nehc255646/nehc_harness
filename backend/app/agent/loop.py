@@ -15,6 +15,9 @@ from app.permissions.gate import gate
 from app.permissions.policy import check_policy
 from app.tools.registry import TOOL_MAP, TOOLS
 
+# M2 子 agent 依赖延迟导入，避免循环
+
+
 logger = logging.getLogger("harness.loop")
 
 
@@ -35,6 +38,9 @@ class AgentLoop:
         self.executor = Executor()
         # 当前轮 pending 的消息 id，用于流式
         self._current_message_id: str | None = None
+        # M2 批量派生跟踪
+        self._current_batch_id: str | None = None
+        self._batch_spawned: int = 0
 
     # ---------- 对外接口 ----------
 
@@ -239,10 +245,25 @@ class AgentLoop:
                 self.state = "running"
                 await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
         elif etype == "subagent_result":
-            # M2 异步回投
+            # M2 交互型异步回投
             result = event.get("result", "")
-            self.history.append({"role": "user", "content": f"[子 agent 结果]\n{result}"})
-            if self.state in ("idle", "done"):
+            sid = event.get("subagent_id", "")
+            self.history.append({"role": "user", "content": f"[子 agent 结果 {sid}]\n{result}"})
+            if self.state in ("idle", "done", "error"):
+                self.state = "running"
+                await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+        elif etype == "worker_batch_done":
+            # M2 工作型批量聚合回投
+            payload = event.get("payload") or {}
+            batch_id = payload.get("batch_id", "")
+            workers = payload.get("workers") or []
+            lines = []
+            for w in workers:
+                lines.append(f"- {w.get('subagent_id')} [{w.get('status')}]: {w.get('result','')[:500]}")
+            content = f"[工作型批量完成] batch_id={batch_id}\n" + "\n".join(lines)
+            self.history.append({"role": "user", "content": content})
+            # 聚合事件也广播，供前端 worker.batch_done 已由子 agent 广播，此处仅注入上下文
+            if self.state in ("idle", "done", "error"):
                 self.state = "running"
                 await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
         elif etype == "stop":
@@ -369,8 +390,39 @@ class AgentLoop:
                 break
         last_user_lower = last_user.lower()
 
-        # 启发式规则：根据用户输入生成演示 tool_calls
-        # 若包含特定关键词，直接生成对应工具调用以触发审批
+        # 回投聚合消息不触发新派生，避免无限递归
+        if last_user.startswith(("[工作型批量完成]", "[子 agent 结果")):
+            return {"text": f"已收到批量回投：{last_user[:200]}", "tool_calls": []}
+        if last_user.startswith(("[交互型", "[迟到")):
+            return {"text": "已知交互结果", "tool_calls": []}
+
+        # 启发式规则：根据用户输入生成演示 tool_calls（派生优先，避免被 shell 吞）
+        if "spawn_subagent" in last_user_lower or "派生交互" in last_user_lower:
+            return {
+                "text": "准备派生交互型子 agent：",
+                "tool_calls": [{"name": "spawn_subagent", "args": {"behavior_desc": "与用户确认需求", "goal": last_user[:200]}, "id": str(uuid.uuid4())}],
+            }
+        if "spawn_workers" in last_user_lower:
+            return {
+                "text": "准备批量派生后台工作型：",
+                "tool_calls": [{"name": "spawn_workers", "args": {"tasks": [f"子任务1: {last_user[:50]}", f"子任务2: {last_user[50:100]}"]}, "id": str(uuid.uuid4())}],
+            }
+        if "spawn_worker" in last_user_lower or "派生工作" in last_user_lower or "后台任务" in last_user_lower:
+            return {
+                "text": "准备派生后台工作型：",
+                "tool_calls": [{"name": "spawn_worker", "args": {"task": last_user[:200]}, "id": str(uuid.uuid4())}],
+            }
+        # 子 agent 通用关键词需在 spawn_workers 之后，避免批量被单条吞
+        if "子 agent" in last_user_lower and "spawn" not in last_user_lower:
+            return {
+                "text": "准备派生交互型子 agent：",
+                "tool_calls": [{"name": "spawn_subagent", "args": {"behavior_desc": "与用户确认需求", "goal": last_user[:200]}, "id": str(uuid.uuid4())}],
+            }
+        if "批量" in last_user_lower:
+            return {
+                "text": "准备批量派生后台工作型：",
+                "tool_calls": [{"name": "spawn_workers", "args": {"tasks": [f"子任务1: {last_user[:50]}", f"子任务2: {last_user[50:100]}"]}, "id": str(uuid.uuid4())}],
+            }
         if "rm -rf" in last_user_lower or "mkfs" in last_user_lower:
             cmd = last_user.strip()
             for prefix in ["执行", "运行", "shell", "执行命令"]:
@@ -382,9 +434,7 @@ class AgentLoop:
                 "tool_calls": [{"name": "shell", "args": {"command": cmd}, "id": str(uuid.uuid4())}],
             }
         if "shell" in last_user_lower or "执行" in last_user_lower or "ls" in last_user_lower or "echo" in last_user_lower:
-            # 提取可能的命令
             cmd = last_user.strip()
-            # 若用户说 "执行 ls" 则提炼
             for prefix in ["执行", "运行", "shell", "执行命令"]:
                 if cmd.startswith(prefix):
                     cmd = cmd[len(prefix) :].strip(" :：")
@@ -425,7 +475,22 @@ class AgentLoop:
         self.history.append({"role": "assistant", "content": content})
 
     async def _dispatch_tools(self, tool_calls: list[dict]) -> list[dict]:
-        """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回"""
+        """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回（M2 支持 spawn_*）"""
+
+        # M2 批量并发检查：预校验本轮 spawn_worker 数量
+        spawn_worker_calls = [tc for tc in tool_calls if tc.get("name") in ("spawn_worker", "spawn_workers")]
+        if len(spawn_worker_calls) > 0:
+            # 统计本次请求的 worker 数量
+            total_req = 0
+            for tc in spawn_worker_calls:
+                args = tc.get("args") or {}
+                if tc.get("name") == "spawn_workers":
+                    total_req += len(args.get("tasks") or [])
+                else:
+                    total_req += 1
+            if total_req > settings.max_workers_per_turn:
+                # 直接返回拒绝，不走审批
+                pass  # 让 _run_one 内部按规则拒绝
 
         async def _run_one(tc: dict) -> dict:
             call_id = tc.get("id") or ""
@@ -438,6 +503,16 @@ class AgentLoop:
                     result = f"[完成] {args.get('message', '任务完成')}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
                     return {"call_id": call_id, "name": name, "result": result, "is_error": False}
+
+                # M2 spawn_* 直接处理（不走 policy）
+                if name in ("spawn_subagent", "spawn_worker", "spawn_workers"):
+                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    result = await self._handle_spawn_tool(name, args)
+                    # spawn 结果是否需要截断
+                    result = truncate_tool_result(str(result), settings.max_tool_result_tokens)
+                    is_err = result.startswith(("[拒绝]", "[错误]"))
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_err})
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": is_err}
 
                 # 1. policy 判定
                 session_rules = gate.get_session_rules(self.session_id)
@@ -485,6 +560,42 @@ class AgentLoop:
         # 并行 gather
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
         return [r for r in results if not isinstance(r, BaseException)]
+
+    async def _handle_spawn_tool(self, name: str, args: dict) -> str:
+        # 延迟导入避免循环
+        try:
+            from app.agent.manager import manager
+            from app.agent.subagent import spawn_interactive, spawn_worker_batch
+        except Exception as e:
+            return f"[错误] 子 agent 模块未就绪: {e}"
+        # 获取主队列与 broadcaster
+        broadcaster = self.broadcaster
+        if name == "spawn_subagent":
+            behavior_desc = args.get("behavior_desc") or args.get("behavior") or ""
+            goal = args.get("goal") or args.get("task") or ""
+            if not behavior_desc and not goal:
+                return "[错误] spawn_subagent 需提供 behavior_desc 或 goal"
+            return await spawn_interactive(
+                self.session_id, behavior_desc, goal, self.history, self.summary, broadcaster, self.queue, manager.get
+            )
+        elif name == "spawn_worker":
+            task = args.get("task") or ""
+            constraints = args.get("constraints") or ""
+            if not task:
+                return "[错误] spawn_worker 需提供 task"
+            return await spawn_worker_batch(
+                self.session_id, [task], self.history, self.summary, broadcaster, self.queue, manager.get, constraints
+            )
+        elif name == "spawn_workers":
+            tasks = args.get("tasks") or []
+            constraints = args.get("constraints") or ""
+            if not tasks:
+                return "[错误] spawn_workers 需提供 tasks 数组"
+            # 防全量转包：检查任务描述是否过于宽泛
+            return await spawn_worker_batch(
+                self.session_id, tasks, self.history, self.summary, broadcaster, self.queue, manager.get, constraints
+            )
+        return f"[错误] 未知 spawn 工具: {name}"
 
     async def _execute_tool(self, name: str, args: dict, call_id: str, decision: str, reason: str) -> dict:
         await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
