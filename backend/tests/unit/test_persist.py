@@ -9,6 +9,7 @@ from app.core.db import init_db
 from app.persist import (
     ensure_session,
     flush_pending,
+    get_tool_log,
     load_history,
     pending_count,
     save_message,
@@ -71,6 +72,64 @@ async def test_tool_log_and_assistant_tool_calls(db_ready):
     )
     hist, _, _ = await load_history(sid)
     assert hist[-1]["tool_calls"][0]["name"] == "shell"
+    log = await get_tool_log(sid, "c1")
+    assert log is not None
+    assert log.message_id is not None
+    assert log.decision == "approved_once"
+
+
+async def test_flush_pending_increments_retries(monkeypatch):
+    from app import persist as persist_mod
+
+    persist_mod._pending.clear()
+    persist_mod._enqueue_pending(
+        "message",
+        {
+            "session_id": "ut_retry",
+            "agent_id": "main",
+            "role": "user",
+            "content": {"text": "x"},
+            "public_id": str(uuid.uuid4()),
+            "tool_call_id": None,
+        },
+    )
+
+    async def boom(**_kwargs):
+        raise RuntimeError("forced fail")
+
+    monkeypatch.setattr(persist_mod, "is_available", lambda: True)
+    monkeypatch.setattr(persist_mod, "save_message", boom)
+    flushed = await persist_mod.flush_pending()
+    assert flushed == 0
+    assert persist_mod.pending_count() == 1
+    assert persist_mod._pending[0].retries == 1
+    persist_mod._pending.clear()
+
+
+async def test_flush_pending_drops_after_five(monkeypatch):
+    from app import persist as persist_mod
+
+    persist_mod._pending.clear()
+    persist_mod._enqueue_pending(
+        "message",
+        {
+            "session_id": "ut_drop",
+            "agent_id": "main",
+            "role": "user",
+            "content": {"text": "x"},
+            "public_id": str(uuid.uuid4()),
+            "tool_call_id": None,
+        },
+    )
+    persist_mod._pending[0].retries = 4
+
+    async def boom(**_kwargs):
+        raise RuntimeError("forced fail")
+
+    monkeypatch.setattr(persist_mod, "is_available", lambda: True)
+    monkeypatch.setattr(persist_mod, "save_message", boom)
+    await persist_mod.flush_pending()
+    assert persist_mod.pending_count() == 0
 
 
 async def test_flush_pending_noop_when_empty(db_ready):

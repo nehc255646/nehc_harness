@@ -44,6 +44,20 @@ export type HistoryMessage = {
   tool_call_id?: string | null;
 };
 
+export type ToolLogRow = {
+  id: number;
+  session_id: string;
+  message_id: number | null;
+  tool_call_id: string;
+  agent_id: string;
+  name: string;
+  args: unknown;
+  result: unknown;
+  is_error: boolean;
+  duration_ms: number | null;
+  decision: string;
+};
+
 export const rest = {
   sessions: () => fetch("/api/sessions").then(json) as Promise<SessionRow[]>,
   createSession: (title?: string, model_id?: number | null) =>
@@ -60,6 +74,7 @@ export const rest = {
     }).then(json) as Promise<SessionRow>,
   deleteSession: (id: string) => fetch(`/api/sessions/${id}`, { method: "DELETE" }).then(json),
   messages: (id: string) => fetch(`/api/sessions/${id}/messages`).then(json) as Promise<HistoryMessage[]>,
+  toolLogs: (id: string) => fetch(`/api/sessions/${id}/tool-logs`).then(json) as Promise<ToolLogRow[]>,
   providers: () => fetch("/api/providers").then(json) as Promise<ProviderRow[]>,
   createProvider: (body: { provider_id: string; display_name: string; base_url: string; api_key: string }) =>
     fetch("/api/providers", {
@@ -99,4 +114,26 @@ export function historyToChat(rows: HistoryMessage[]): { id: string; role: strin
       const text = typeof r.content === "string" ? r.content : r.content?.text || "";
       return { id: r.public_id, role: r.role, content: text };
     });
+}
+
+export function mergeChatMessages(
+  fromRest: { id: string; role: string; content: string }[],
+  live: { id: string; role: string; content: string; streaming?: boolean }[],
+): { id: string; role: string; content: string; streaming?: boolean }[] {
+  const restIds = new Set(fromRest.map((m) => m.id));
+  const liveById = new Map(live.map((m) => [m.id, m]));
+  const merged: { id: string; role: string; content: string; streaming?: boolean }[] = fromRest.map((m) => {
+    const cur = liveById.get(m.id);
+    if (!cur) return m;
+    return {
+      id: m.id,
+      role: cur.role || m.role,
+      content: cur.streaming ? cur.content : cur.content || m.content,
+      streaming: cur.streaming,
+    };
+  });
+  for (const m of live) {
+    if (!restIds.has(m.id)) merged.push(m);
+  }
+  return merged;
 }

@@ -41,10 +41,18 @@ async def init_db() -> bool:
     loop = asyncio.get_running_loop()
     # pytest 每测例新 loop：旧 engine 不能跨 loop 复用
     if _engine is not None and _loop is not loop:
+        old = _engine
         _engine = None
         _sessionmaker = None
         _available = False
         _loop = None
+        try:
+            await old.dispose()
+        except Exception:
+            try:
+                old.sync_engine.dispose()
+            except Exception as e:
+                logger.debug("dispose previous MySQL engine failed: %s", e)
     if _available and _engine is not None:
         return True
     try:

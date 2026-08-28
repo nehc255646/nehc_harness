@@ -69,8 +69,9 @@ class AgentLoop:
         """M3: 从 DB 历史 + 摘要重建上下文，并按会话模型实例化 executor。"""
         hist, summary, _mid = await persist_mod.load_history(self.session_id)
         if hist:
-            self.history = hist
-            logger.info("Hydrated %d messages for session=%s", len(hist), self.session_id)
+            _slid, window = window_slice(hist, settings.window_n)
+            self.history = window
+            logger.info("Hydrated %d messages for session=%s", len(window), self.session_id)
         if summary:
             self.summary = summary
         self.executor = await Executor.from_session_id(self.session_id)
@@ -131,8 +132,8 @@ class AgentLoop:
 
     async def run(self):
         logger.info("AgentLoop run started: session=%s", self.session_id)
-        # 初始无待处理工作时保持 idle，不误报 running
-        self.state = "idle" if self.queue.empty() and not self.history else "running"
+        # 队列空则 idle：hydrate 重建的历史不是进行中的一轮，须等新的用户/回投事件
+        self.state = "idle" if self.queue.empty() else "running"
         await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": self.state})
 
         try:
@@ -178,11 +179,39 @@ class AgentLoop:
                     await self._emit_message("已达到最大轮数，任务结束。", done=True)
                     break
 
+                if getattr(self.executor, "unresolved", False):
+                    await self._broadcast(
+                        "error",
+                        {"code": ErrorCode.MODEL_ERROR, "message": "会话模型无法解析或解密"},
+                    )
+                    self.state = "error"
+                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+                    try:
+                        event = await self.queue.get()
+                        await self._handle_incoming(event)
+                        self.state = "running"
+                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                    except asyncio.CancelledError:
+                        break
+                    continue
+
                 try:
                     result = await self._call_model(messages)
                 except Exception as e:
                     logger.exception("Model call failed")
-                    # 降级：若模型不可用，走 heuristic 演示，避免无限重试
+                    # 已选模型解析失败不走演示；其余模型错误才 heuristic
+                    if getattr(self.executor, "unresolved", False):
+                        await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
+                        self.state = "error"
+                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+                        try:
+                            event = await self.queue.get()
+                            await self._handle_incoming(event)
+                            self.state = "running"
+                            await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                        except asyncio.CancelledError:
+                            break
+                        continue
                     try:
                         result = self._heuristic_fallback(messages)
                         result["streamed"] = False
@@ -229,6 +258,15 @@ class AgentLoop:
                 has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
                 # 并行分发（每轮重置派生计数）
                 self._turn_spawned = 0
+                if not self._current_message_id:
+                    self._current_message_id = str(uuid.uuid4())
+                # 先落 assistant 行，供同轮 ToolLog.message_id 关联
+                await self._persist_message(
+                    "assistant",
+                    text or "",
+                    public_id=self._current_message_id,
+                    tool_calls=tool_calls,
+                )
                 tool_results = await self._dispatch_tools(tool_calls)
                 # 原子回填历史 (assistant tool_calls + tool results)
                 assistant_msg = {

@@ -27,6 +27,7 @@ class Executor:
         api_key: str | None = None,
         temperature: float = 0.2,
         retry_count: int | None = None,
+        unresolved: bool = False,
     ):
         self.model = model or settings.openai_model or "gpt-4o-mini"
         self.base_url = base_url or settings.openai_base_url or None
@@ -35,7 +36,11 @@ class Executor:
         self.retry_count = retry_count if retry_count is not None else settings.retry_count
         self.context_window = 128000
         self.model_pk: int | None = None
+        self.unresolved = unresolved
         self._llm = None
+        if unresolved:
+            self.api_key = ""
+            return
         self._init_llm()
 
     @classmethod
@@ -54,14 +59,17 @@ class Executor:
                     if db is not None:
                         sess = await db.get(ChatSession, session_id)
                         if sess and sess.model_id:
-                            model = (
-                                await db.scalars(
-                                    select(Model)
-                                    .options(selectinload(Model.provider))
-                                    .where(Model.id == sess.model_id)
-                                )
-                            ).first()
-                            if model and model.provider:
+                            try:
+                                model = (
+                                    await db.scalars(
+                                        select(Model)
+                                        .options(selectinload(Model.provider))
+                                        .where(Model.id == sess.model_id)
+                                    )
+                                ).first()
+                                if not model or not model.provider:
+                                    logger.warning("session model missing: session=%s model_id=%s", session_id, sess.model_id)
+                                    return cls(unresolved=True)
                                 key = decrypt_secret(model.provider.api_key_encrypted)
                                 inst = cls(
                                     model=model.model_id,
@@ -72,6 +80,9 @@ class Executor:
                                 inst.context_window = model.context_window
                                 inst.model_pk = model.id
                                 return inst
+                            except Exception as e:
+                                logger.warning("Executor.from_session_id model bind failed: %s", e)
+                                return cls(unresolved=True)
             except Exception as e:
                 logger.warning("Executor.from_session_id failed, fallback env: %s", e)
         return cls()

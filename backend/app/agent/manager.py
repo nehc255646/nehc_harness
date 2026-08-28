@@ -38,6 +38,12 @@ class AgentManager:
         return self._agents.get(session_id)
 
     async def drop(self, session_id: str):
+        try:
+            from app.agent.subagent import stop_session_subagents
+
+            await stop_session_subagents(session_id)
+        except Exception:
+            logger.exception("stop subagents on drop failed: %s", session_id)
         agent = self._agents.pop(session_id, None)
         if agent:
             try:

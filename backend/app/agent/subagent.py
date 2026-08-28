@@ -287,11 +287,18 @@ class SubAgentLoop:
                 await self._finish("done", f"[触顶] 超过最大轮数 {settings.max_rounds}")
                 break
 
+            if getattr(self.executor, "unresolved", False):
+                await self._finish("error", "[模型错误] 会话模型无法解析或解密")
+                break
+
             # 调用模型
             try:
                 result = await self._call_model(messages)
             except Exception as e:
                 logger.exception("SubAgent model call failed")
+                if getattr(self.executor, "unresolved", False):
+                    await self._finish("error", f"[模型错误] {e}")
+                    break
                 try:
                     result = self._heuristic_fallback(messages)
                     result["streamed"] = False
@@ -491,22 +498,29 @@ class SubAgentLoop:
                 session_rules = gate.get_session_rules(self.session_id)
                 decision, reason, needs_approval = check_policy(name, args, session_rules)
                 if decision == "blocked":
-                    return {"call_id": call_id, "name": name, "result": f"[拒绝] {reason} (blocked)", "is_error": True}
+                    result = f"[拒绝] {reason} (blocked)"
+                    await self._persist_worker_log(name, args, result, call_id, True, "blocked", reason)
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 if not needs_approval:
-                    return await self._execute_worker_tool(name, args, call_id)
+                    return await self._execute_worker_tool(name, args, call_id, decision, reason)
                 # 需审批
                 approval_id, fut = await gate.request_approval(self.session_id, self.subagent_id, name, args, reason)
                 await _broadcast(self.session_id, "approval.request", {"approval_id": approval_id, "tool": name, "args": args, "reason": reason, "subagent_id": self.subagent_id}, self.broadcaster)
                 try:
-                    approved, _decision_val, resolve_reason = await asyncio.wait_for(fut, timeout=settings.approval_timeout)
+                    approved, decision_val, resolve_reason = await asyncio.wait_for(fut, timeout=settings.approval_timeout)
                 except TimeoutError:
                     gate.resolve(approval_id, "timeout", "timeout")
                     await _broadcast(self.session_id, "approval.resolved", {"approval_id": approval_id, "approved": False, "reason": "timeout"}, self.broadcaster)
-                    return {"call_id": call_id, "name": name, "result": f"[超时] 审批超时 {name}", "is_error": True}
+                    result = f"[超时] 审批超时 {name}"
+                    await self._persist_worker_log(name, args, result, call_id, True, "timeout")
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 await _broadcast(self.session_id, "approval.resolved", {"approval_id": approval_id, "approved": approved, "reason": resolve_reason}, self.broadcaster)
                 if not approved:
-                    return {"call_id": call_id, "name": name, "result": f"[拒绝] 用户拒绝: {reason}", "is_error": True}
-                return await self._execute_worker_tool(name, args, call_id)
+                    result = f"[拒绝] 用户拒绝: {reason}"
+                    await self._persist_worker_log(name, args, result, call_id, True, "rejected", reason)
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                mapped = "approved_similar" if decision_val == "approve_similar" else "approved_once"
+                return await self._execute_worker_tool(name, args, call_id, mapped, reason)
             except Exception as e:
                 logger.exception("Worker tool dispatch error")
                 return {"call_id": call_id, "name": name, "result": f"[异常] {e}", "is_error": True}
@@ -514,7 +528,36 @@ class SubAgentLoop:
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
         return [r for r in results if not isinstance(r, BaseException)]
 
-    async def _execute_worker_tool(self, name: str, args: dict, call_id: str) -> dict:
+    async def _persist_worker_log(
+        self,
+        name: str,
+        args: dict,
+        result: str,
+        call_id: str,
+        is_error: bool,
+        decision: str,
+        rule_hit: str | None = None,
+    ) -> None:
+        try:
+            from app import persist as persist_mod
+
+            await persist_mod.save_tool_log(
+                session_id=self.session_id,
+                agent_id=self.subagent_id,
+                name=name,
+                args=args or {},
+                result=result,
+                tool_call_id=call_id,
+                is_error=is_error,
+                decision=decision,
+                rule_hit=rule_hit,
+            )
+        except Exception:
+            logger.debug("persist worker tool_log failed", exc_info=True)
+
+    async def _execute_worker_tool(
+        self, name: str, args: dict, call_id: str, decision: str = "config_allow", reason: str = ""
+    ) -> dict:
         await _broadcast(self.session_id, "tool.start", {"call_id": call_id, "name": name, "args": args, "subagent_id": self.subagent_id}, self.broadcaster)
         is_error = False
         try:
@@ -538,25 +581,12 @@ class SubAgentLoop:
                     result = str(result)
                     result = truncate_tool_result(result, settings.max_tool_result_tokens)
             await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": is_error, "subagent_id": self.subagent_id}, self.broadcaster)
-            try:
-                from app import persist as persist_mod
-
-                await persist_mod.save_tool_log(
-                    session_id=self.session_id,
-                    agent_id=self.subagent_id,
-                    name=name,
-                    args=args or {},
-                    result=result,
-                    tool_call_id=call_id,
-                    is_error=is_error,
-                    decision="config_allow",
-                )
-            except Exception:
-                logger.debug("persist worker tool_log failed", exc_info=True)
+            await self._persist_worker_log(name, args, result, call_id, is_error, decision, reason or None)
             return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
         except Exception as e:
             result = f"[异常] {name} 执行失败: {e}"
             await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": True, "subagent_id": self.subagent_id}, self.broadcaster)
+            await self._persist_worker_log(name, args, result, call_id, True, decision, reason or None)
             return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
     async def _handle_worker_finish(self, result: str, status: str):
@@ -789,6 +819,22 @@ async def stop_subagent(subagent_id: str) -> bool:
         task.cancel()
     logger.info("SubAgent stopped by user: %s session=%s", subagent_id, rec.session_id)
     return True
+
+
+async def stop_session_subagents(session_id: str) -> int:
+    """终止某会话下全部子 agent（删除会话前）。"""
+    ids = list(_session_index.get(session_id) or [])
+    n = 0
+    tasks = []
+    for sid in ids:
+        t = _tasks.get(sid)
+        if await stop_subagent(sid):
+            n += 1
+            if t is not None:
+                tasks.append(t)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return n
 
 
 def list_panels_and_workers(session_id: str) -> tuple[list[dict], list[dict]]:

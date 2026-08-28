@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { historyToChat, rest, type ModelRow, type SessionRow } from "../api/rest";
+import { historyToChat, mergeChatMessages, rest, type ModelRow, type SessionRow, type ToolLogRow } from "../api/rest";
 import { wsClient } from "../api/ws";
 
 type Message = { id: string; role: string; content: string; streaming?: boolean };
@@ -92,14 +92,34 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         agentState: (p.agent_state as AgentState) || s.agentState,
       };
     });
-    // 从 REST 拉历史（重启后续聊）
+    // 从 REST 拉历史；按 id 合并，保留 hello 之后到达的流式/本地气泡
     rest
       .messages(sid2)
       .then((rows) => {
-        set((s) => (s.sessionId === sid2 ? { messages: historyToChat(rows) } : {}));
+        set((s) => (s.sessionId === sid2 ? { messages: mergeChatMessages(historyToChat(rows), s.messages) } : {}));
       })
       .catch(() => {
         /* mysql 降级时忽略 */
+      });
+    rest
+      .toolLogs(sid2)
+      .then((rows: ToolLogRow[]) => {
+        set((s) => {
+          if (s.sessionId !== sid2) return {};
+          const fromRest = rows
+            .filter((r) => r.agent_id === "main")
+            .map((r) => ({ call_id: r.tool_call_id, name: r.name, args: r.args, result: r.result }));
+          const restIds = new Set(fromRest.map((t) => t.call_id));
+          const liveById = new Map(s.toolCalls.map((t) => [t.call_id, t]));
+          const merged = fromRest.map((t) => liveById.get(t.call_id) ?? t);
+          for (const t of s.toolCalls) {
+            if (!restIds.has(t.call_id)) merged.push(t);
+          }
+          return { toolCalls: merged };
+        });
+      })
+      .catch(() => {
+        /* ignore */
       });
     rest
       .sessions()

@@ -70,6 +70,42 @@ async def test_stop_interactive_subagent():
     assert await sa.stop_subagent(sid) is False
 
 
+async def test_stop_session_subagents_cancels_running():
+    async def noop_enqueue(_ev):
+        return None
+
+    res = await sa.spawn_interactive("ut_stop_sess", "行为", "目标", [], None, None, noop_enqueue, lambda _sid: None)
+    sid = res.split("id=")[1].split(" ")[0]
+    await asyncio.sleep(0.2)
+    n = await sa.stop_session_subagents("ut_stop_sess")
+    assert n >= 1
+    await asyncio.sleep(0.2)
+    assert sa._subagents[sid].status == "done"
+
+
+async def test_unresolved_executor_does_not_heuristic():
+    from app.agent.executor import Executor
+
+    ag = AgentLoop("ut_unresolved")
+    ag.executor = Executor(unresolved=True)
+    errors: list[dict] = []
+
+    async def capture(_sid, event, payload):
+        if event == "error":
+            errors.append(payload)
+
+    ag.set_broadcaster(capture)
+    await ag.start()
+    await ag.enqueue({"type": "user_message", "content": "hello"})
+    for _ in range(80):
+        await asyncio.sleep(0.02)
+        if errors or ag.state == "error":
+            break
+    assert ag.state == "error"
+    assert any(e.get("code") == "MODEL_ERROR" or getattr(e.get("code"), "value", None) == "MODEL_ERROR" for e in errors)
+    await ag.stop()
+
+
 async def test_worker_single_batch_completes_and_cleans():
     """单 worker 完成后批次聚合并清理，结果回投主 agent 队列"""
     from app.permissions.gate import gate

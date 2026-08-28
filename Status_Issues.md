@@ -56,5 +56,14 @@
 - MySQL 不可用降级内存运行；pytest 跨 loop 用 NullPool + 按 event loop 重建引擎
 - 验证：`ruff` 0 告警 / `pytest 42 passed` / `tsc` / `eslint` / `vite build`；REST 会话+模型闭环单测
 
+## M3 审查修复
+- hydrate 后 `start()` 保持 idle，等用户消息/回投再调模型（不自动续跑已落库 transcript）
+- 同轮先落 assistant `Message` 再写 ToolLog，保证 `message_id` 可关联
+- `session.hello` 拉历史按 `public_id`/`call_id` 合并，不覆盖在途流式与本地气泡；主 agent tool-logs 补工具卡
+- pending 补写 `enqueue_on_fail=False`，失败累加 retries，满 5 次丢弃
+- worker ToolLog 写入真实 decision；blocked/timeout/rejected 同样落库
+- hydrate 按滑动窗口裁剪内存历史（库内全文仍供 REST 展示）；`model_id` 解析/解密失败标 unresolved，报 MODEL_ERROR，不静默 heuristic
+- 删除会话先 `stop_session_subagents`；跨 loop 重建引擎时 dispose 旧 engine
+
 ## 待办 M4
 - Redis 全面：agent 状态 TTL、pending 审批、会话放行规则、断线 hello 对账、摘要缓存增量合并

@@ -206,6 +206,7 @@ async def save_message(
     tool_call_id: str | None = None,
     tool_calls: list | None = None,
     name: str | None = None,
+    enqueue_on_fail: bool = True,
 ) -> str | None:
     """message.done / 用户消息落库。返回 public_id。失败入待写队列。"""
     pid = public_id or str(uuid.uuid4())
@@ -226,13 +227,17 @@ async def save_message(
         "tool_call_id": tool_call_id,
     }
     if not is_available():
-        _enqueue_pending("message", payload)
-        return pid
+        if enqueue_on_fail:
+            _enqueue_pending("message", payload)
+            return pid
+        raise RuntimeError("db unavailable")
     try:
         async with session_scope() as db:
             if db is None:
-                _enqueue_pending("message", payload)
-                return pid
+                if enqueue_on_fail:
+                    _enqueue_pending("message", payload)
+                    return pid
+                raise RuntimeError("db unavailable")
             sess = await db.get(ChatSession, session_id)
             if sess is None:
                 db.add(ChatSession(id=session_id, title="New Session", status="active"))
@@ -264,8 +269,10 @@ async def save_message(
         return pid
     except Exception as e:
         logger.warning("save_message failed: %s", e)
-        _enqueue_pending("message", payload)
-        return pid
+        if enqueue_on_fail:
+            _enqueue_pending("message", payload)
+            return pid
+        raise
 
 
 async def save_tool_log(
@@ -281,6 +288,7 @@ async def save_tool_log(
     decision: str | None = None,
     rule_hit: str | None = None,
     message_public_id: str | None = None,
+    enqueue_on_fail: bool = True,
 ) -> None:
     payload = {
         "session_id": session_id,
@@ -296,14 +304,18 @@ async def save_tool_log(
         "message_public_id": message_public_id,
     }
     if not is_available():
-        _enqueue_pending("tool_log", payload)
-        return
+        if enqueue_on_fail:
+            _enqueue_pending("tool_log", payload)
+            return
+        raise RuntimeError("db unavailable")
     try:
         await ensure_session(session_id)
         async with session_scope() as db:
             if db is None:
-                _enqueue_pending("tool_log", payload)
-                return
+                if enqueue_on_fail:
+                    _enqueue_pending("tool_log", payload)
+                    return
+                raise RuntimeError("db unavailable")
             message_pk = None
             if message_public_id:
                 msg = (await db.scalars(select(Message).where(Message.public_id == message_public_id))).first()
@@ -326,7 +338,10 @@ async def save_tool_log(
             )
     except Exception as e:
         logger.warning("save_tool_log failed: %s", e)
-        _enqueue_pending("tool_log", payload)
+        if enqueue_on_fail:
+            _enqueue_pending("tool_log", payload)
+            return
+        raise
 
 
 async def upsert_subagent_run(
@@ -340,6 +355,7 @@ async def upsert_subagent_run(
     result: str | None = None,
     late: bool = False,
     finished: bool = False,
+    enqueue_on_fail: bool = True,
 ) -> None:
     payload = {
         "main_session_id": main_session_id,
@@ -353,14 +369,18 @@ async def upsert_subagent_run(
         "finished": finished,
     }
     if not is_available():
-        _enqueue_pending("subagent_run", payload)
-        return
+        if enqueue_on_fail:
+            _enqueue_pending("subagent_run", payload)
+            return
+        raise RuntimeError("db unavailable")
     try:
         await ensure_session(main_session_id)
         async with session_scope() as db:
             if db is None:
-                _enqueue_pending("subagent_run", payload)
-                return
+                if enqueue_on_fail:
+                    _enqueue_pending("subagent_run", payload)
+                    return
+                raise RuntimeError("db unavailable")
             row = (await db.scalars(select(SubAgentRun).where(SubAgentRun.subagent_id == subagent_id))).first()
             if row is None:
                 row = SubAgentRun(
@@ -387,7 +407,10 @@ async def upsert_subagent_run(
                 row.finished_at = utcnow()
     except Exception as e:
         logger.warning("upsert_subagent_run failed: %s", e)
-        _enqueue_pending("subagent_run", payload)
+        if enqueue_on_fail:
+            _enqueue_pending("subagent_run", payload)
+            return
+        raise
 
 
 async def load_history(session_id: str) -> tuple[list[dict], str | None, int | None]:
@@ -524,9 +547,14 @@ async def flush_pending() -> int:
     for item in items:
         try:
             if item.kind == "message":
-                await save_message(**{k: item.payload[k] for k in item.payload if k in (
-                    "session_id", "agent_id", "role", "content", "public_id", "tool_call_id"
-                )})
+                await save_message(
+                    **{
+                        k: item.payload[k]
+                        for k in item.payload
+                        if k in ("session_id", "agent_id", "role", "content", "public_id", "tool_call_id")
+                    },
+                    enqueue_on_fail=False,
+                )
             elif item.kind == "tool_log":
                 await save_tool_log(
                     session_id=item.payload["session_id"],
@@ -540,6 +568,7 @@ async def flush_pending() -> int:
                     decision=item.payload.get("decision"),
                     rule_hit=item.payload.get("rule_hit"),
                     message_public_id=item.payload.get("message_public_id"),
+                    enqueue_on_fail=False,
                 )
             elif item.kind == "subagent_run":
                 await upsert_subagent_run(
@@ -552,6 +581,7 @@ async def flush_pending() -> int:
                     result=item.payload.get("result"),
                     late=item.payload.get("late", False),
                     finished=item.payload.get("finished", False),
+                    enqueue_on_fail=False,
                 )
             elif item.kind == "ensure_session":
                 await ensure_session(
