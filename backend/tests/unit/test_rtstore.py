@@ -1,6 +1,7 @@
 """M4 Redis 实时层 — 状态 TTL / pending / 放行规则 / 摘要缓存"""
 
 import asyncio
+import fnmatch
 
 import pytest
 
@@ -16,6 +17,11 @@ class FakeRedis:
 
     async def ping(self):
         return True
+
+    async def scan_iter(self, match=None, count=None):
+        for k in list(self.kv):
+            if match is None or fnmatch.fnmatch(k, match):
+                yield k
 
     async def set(self, key, value, ex=None):
         self.kv[key] = value

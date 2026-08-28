@@ -101,13 +101,30 @@ _RM_FLAG_RECURSIVE = ("r", "R", "recursive")
 _RM_FLAG_FORCE = ("f", "force")
 
 
+def _unwrap_token(tok: str) -> str:
+    """剥离命令替换/引号包裹的边界字符：$(rm、rm)、`rm` 等归一为 rm。"""
+    return re.sub(r"^\W+|\W+$", "", tok)
+
+
 def _rm_rf_hit(tokens: list[str]) -> bool:
-    """rm 同时带递归与强制旗标即命中（兼容 sudo 前缀与组合短旗标如 -rf/-fr）"""
-    start = 1 if tokens and tokens[0] == "sudo" else 0
-    if len(tokens) <= start or tokens[start] != "rm":
-        return False
+    """rm 同时带递归与强制旗标即命中。
+
+    扫描 token 序列任意位置出现的 rm（含 sudo rm），覆盖命令替换/换行等
+    拆分器无法切开的嵌套写法，如 echo $(rm -rf /)。
+    """
+    for i, tok in enumerate(tokens):
+        unwrapped = _unwrap_token(tok)
+        if unwrapped != "rm" and not (unwrapped == "sudo" and i + 1 < len(tokens) and _unwrap_token(tokens[i + 1]) == "rm"):
+            continue
+        start = i + 1 if unwrapped == "sudo" else i
+        if _rm_flags_hit(tokens[start + 1 :]):
+            return True
+    return False
+
+
+def _rm_flags_hit(rest: list[str]) -> bool:
     recursive = force = False
-    for t in tokens[start + 1 :]:
+    for t in rest:
         if t == "--":
             break  # -- 之后的都是文件名
         if t.startswith("--"):

@@ -36,6 +36,14 @@ def test_blacklist_split_by_separators():
     assert is_blacklisted("echo hi || echo bye") == (False, None)
 
 
+def test_blacklist_command_substitution():
+    # 命令替换/换行等拆分器切不开的嵌套写法也要命中（任意位置 rm 检测）
+    assert is_blacklisted("echo $(rm -rf /)") == (True, "rm -rf")
+    assert is_blacklisted("echo ${rm -rf /}") == (True, "rm -rf")
+    assert is_blacklisted("bash -c 'rm -rf /'") == (True, "rm -rf")
+    assert is_blacklisted("echo hi\nrm -rf /tmp") == (True, "rm -rf")
+
+
 def test_config_allow():
     # allow_rules.yaml 中已配置
     assert is_shell_prefix_allowed("git status") is True

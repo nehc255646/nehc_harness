@@ -164,8 +164,12 @@ def grep(pattern: str, path: str = ".") -> str:
     for f in files:
         if not f.is_file():
             continue
-        # 跳过二进制/大文件
-        if f.stat().st_size > 2_000_000:
+        # 跳过二进制/大文件；stat 竞态（删除/权限）逐条跳过而非整次失败
+        try:
+            if f.stat().st_size > 2_000_000:
+                continue
+        except OSError as e:
+            logger.debug("grep stat failed: %s", e)
             continue
         try:
             text = f.read_text(encoding="utf-8", errors="ignore")

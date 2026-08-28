@@ -1,6 +1,7 @@
 """手写 asyncio loop — 对应 PLAN.md §2.1"""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -33,6 +34,11 @@ from app.tools.registry import TOOL_MAP, TOOLS
 logger = logging.getLogger("harness.loop")
 
 
+def _msg_sig(m: dict) -> str:
+    """消息内容签名，用于摘要合并去重。"""
+    return json.dumps(m, ensure_ascii=False, sort_keys=True, default=str)
+
+
 class AgentLoop:
     """每轮：drain 队列 → 构造 messages → 调模型 → 分发工具(含用户门) → 原子回填"""
 
@@ -54,6 +60,8 @@ class AgentLoop:
         self._current_message_id: str | None = None
         # 当前轮已派生工作型数量（防全量转包，跨多次 spawn 调用累计）
         self._turn_spawned: int = 0
+        # 摘要合并失败后的重试冷却（避免每轮空转调 LLM）
+        self._summary_retry_after: float = 0.0
 
     # ---------- 对外接口 ----------
 
@@ -122,21 +130,7 @@ class AgentLoop:
 
     async def stop(self):
         self._stop_event.set()
-        # 清空队列
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        # 拒绝所有 pending 审批
-        gate.reject_all_for_session(self.session_id, reason="stopped")
-        # 回收本 agent 的 shell 进程组（key 含 session 前缀，避免跨会话误杀）
-        try:
-            from app.tools.shell import kill_shell_group
-
-            kill_shell_group(self._shell_group())
-        except Exception as e:
-            logger.debug("Kill shell group failed: %s", e)
+        self._shutdown_cleanup()
         await self._set_state("done")
         if self._task:
             self._task.cancel()
@@ -144,6 +138,21 @@ class AgentLoop:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+    def _shutdown_cleanup(self):
+        """停止前置清理：清队列 / 拒审批 / 回收 shell 进程组（可从任务内部安全调用）"""
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        gate.reject_all_for_session(self.session_id, reason="stopped")
+        try:
+            from app.tools.shell import kill_shell_group
+
+            kill_shell_group(self._shell_group())
+        except Exception as e:
+            logger.debug("Kill shell group failed: %s", e)
 
     def _shell_group(self) -> str:
         # 进程组 key 必须会话内唯一：不同会话的主 agent 同名 "main"，裸 agent_id 会互相误杀
@@ -201,16 +210,21 @@ class AgentLoop:
                     except Exception:
                         logger.exception("Queue handling failed")
                         continue
-                else:
-                    # 非 idle：drain 所有积压事件 (非阻塞)
-                    drained = []
-                    while not self.queue.empty():
-                        try:
-                            drained.append(self.queue.get_nowait())
-                        except asyncio.QueueEmpty:
-                            break
-                    for ev in drained:
-                        await self._handle_incoming(ev)
+                    else:
+                        # 非 idle：drain 所有积压事件 (非阻塞)
+                        drained = []
+                        while not self.queue.empty():
+                            try:
+                                drained.append(self.queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+                        for ev in drained:
+                            await self._handle_incoming(ev)
+
+                # 队列内 stop 事件：清理已完成，直接退出主循环
+                if self._stop_event.is_set():
+                    await self._set_state("done")
+                    break
 
                 await self._maybe_compact()
                 # 2. 构造 messages
@@ -384,7 +398,9 @@ class AgentLoop:
             if self.state in ("idle", "done", "error"):
                 await self._set_state("running")
         elif etype == "stop":
-            await self.stop()
+            # 队列内停止：只做清理与置位，由 run 主循环退出（不从任务内部自取消）
+            self._shutdown_cleanup()
+            self._stop_event.set()
 
     def _build_messages(self) -> list[dict]:
         # 滑动窗口最近 N 个 turn（window_slice 吸附 tool 组边界）
@@ -443,10 +459,13 @@ class AgentLoop:
             logger.debug("persist tool_log failed", exc_info=True)
 
     async def _maybe_compact(self):
-        """token 超阈值：旧摘要 + 滑出消息增量合并；失败则把滑出消息缓存在 Redis 待下次合并。"""
+        """token 超阈值：旧摘要 + 滑出消息增量合并；失败则不截断 history，冷却后重试。"""
         tokens = estimate_tokens(self.history, self.summary)
         ctx = getattr(self.executor, "context_window", None) or 128000
         if not should_summarize(tokens, ctx, settings.summary_token_ratio):
+            return
+        # 摘要失败冷却期内不重试，避免每轮空转调 LLM
+        if time.time() < self._summary_retry_after:
             return
         slid, window = window_slice(self.history, settings.window_n)
         if not slid:
@@ -456,6 +475,9 @@ class AgentLoop:
         except Exception:
             cache = None
         pending_slid = list((cache or {}).get("pending_slid") or [])
+        # 摘要失败不截断 history 后重试时，滑出集是 pending 的超集，按内容去重防重复合并
+        slid_sigs = {_msg_sig(m) for m in slid}
+        pending_slid = [m for m in pending_slid if _msg_sig(m) not in slid_sigs]
         to_merge = pending_slid + slid
         fp = slid_fingerprint(to_merge)
         if cache and cache.get("last_slid_hash") == fp and cache.get("text") and not pending_slid:
@@ -470,9 +492,16 @@ class AgentLoop:
             self.summary = new_sum
             self.summary_version = int(payload["version"])
             self.summary_covered = int(payload["covered_count"])
+            self.history = window
         else:
-            logger.warning("摘要失败，窗口外 %d 条进入待合并缓存 session=%s", len(to_merge), self.session_id)
-        self.history = window
+            # 摘要失败：不截断 history，防止内容既不在窗口也不在摘要；滑出消息仍缓存待合并
+            self._summary_retry_after = time.time() + 120
+            logger.warning(
+                "摘要失败，保留完整 history（%d 条，滑出 %d 条待合并）session=%s",
+                len(self.history),
+                len(to_merge),
+                self.session_id,
+            )
         try:
             await persist_mod.save_summary(self.session_id, self.summary)
         except Exception:
@@ -502,6 +531,8 @@ class AgentLoop:
         """调用模型，支持流式，返回 {text, tool_calls, streamed}"""
         # 若 executor 未初始化或为演示 key，走 heuristic fallback (无 key 时保证 M1 可验收)
         if self.executor._llm is None or getattr(self.executor, "api_key", "") in ("sk-test", "", None):
+            # 重置消息 id：heuristic 路径不产生流式 message，防止 tool_calls 分支复用上一轮 id 覆盖旧落库行
+            self._current_message_id = None
             res = self._heuristic_fallback(messages)
             res["streamed"] = False
             return res

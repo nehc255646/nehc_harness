@@ -177,7 +177,8 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     const id = p.message_id as string;
     const subagentId = p.subagent_id as string | undefined;
     if (subagentId) {
-      // 子 agent 流式 → 侧栏面板
+      // 子 agent 流式 → 侧栏面板；防 start/done 失配导致 map 无限增长
+      if (subMessageOwner.size > 500) subMessageOwner.clear();
       subMessageOwner.set(id, subagentId);
       set((s) => ({
         subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => [
@@ -234,7 +235,9 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     if (p.subagent_id) return;
     set((s) => ({ toolCalls: [...s.toolCalls, { call_id: p.call_id as string, name: p.name as string, args: p.args }] }));
   });
-  wsClient.on("tool.result", (p) =>
+  wsClient.on("tool.result", (p) => {
+    // 与 tool.start 一致：工作型子 agent 工具结果不进主聊天
+    if (p.subagent_id) return;
     set((s) => ({
       toolCalls: s.toolCalls.map((t) =>
         t.call_id === p.call_id
@@ -246,8 +249,8 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
             }
           : t,
       ),
-    })),
-  );
+    }));
+  });
   wsClient.on("tool.progress", (p) => {
     if (p.subagent_id) return;
     set((s) => ({
@@ -264,6 +267,30 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("approval.resolved", (p) =>
     set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== p.approval_id) })),
   );
+  wsClient.on("error", (p) => {
+    // 后端错误（模型失败/审批已处理/agent 不存在）落为本地错误气泡，不再静默
+    const message = typeof p.message === "string" ? p.message : JSON.stringify(p);
+    set((s) => ({
+      messages: [...s.messages, { id: `err-${Date.now()}`, role: "assistant", content: `[错误] ${message}` }],
+    }));
+  });
+  wsClient.on("session.deleted", (p) => {
+    // 其他标签页删除了当前会话：刷新列表并切换到首个会话
+    const deletedId = p.session_id as string;
+    if (deletedId !== get().sessionId) return;
+    rest
+      .sessions()
+      .then((rows) => {
+        const next = rows[0];
+        if (next) {
+          set({ sessionRows: rows });
+          wsClient.send("session.select", { session_id: next.id });
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+  });
   wsClient.on("subagent.opened", (p) => {
     const panel = p as unknown as SubPanel;
     // interactive 侧栏，worker 忽略（由 worker.status 展示）

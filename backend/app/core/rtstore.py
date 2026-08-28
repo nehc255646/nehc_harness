@@ -236,6 +236,15 @@ async def purge_session(session_id: str) -> None:
             key_summary(session_id),
             key_agent_state(session_id, "main"),
         ]
+        # 子 agent state 键按前缀尽力扫描清理（不支持的客户端跳过，键靠 TTL 过期）
+        try:
+            pattern = f"{PREFIX}:agent:{session_id}:*:state"
+            async for k in r.scan_iter(match=pattern, count=100):
+                k = str(k)
+                if k not in keys:
+                    keys.append(k)
+        except Exception:
+            logger.debug("scan agent state keys failed", exc_info=True)
         await r.delete(*keys)
     except Exception:
         logger.debug("purge_session failed", exc_info=True)

@@ -17,6 +17,28 @@ except Exception:
     ChatOpenAI = None  # type: ignore
 
 
+def _to_lc_messages(messages: list[dict]) -> list:
+    """OpenAI 格式 → LangChain 消息（ainvoke/astream 共用）。"""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    lc_messages = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            kwargs: dict[str, Any] = {"content": content or ""}
+            if m.get("tool_calls"):
+                kwargs["tool_calls"] = m["tool_calls"]
+            lc_messages.append(AIMessage(**kwargs))
+        elif role == "tool":
+            lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
+    return lc_messages
+
+
 class Executor:
     """按 env 或显式参数实例化 ChatOpenAI，支持 bind_tools + 流式"""
 
@@ -116,50 +138,14 @@ class Executor:
         if self._llm is None:
             raise RuntimeError("LLM 未初始化")
         llm = self.bind_tools(tools) if tools else self._llm
-        # messages 为 OpenAI 格式，需转为 LangChain 消息
-        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-
-        lc_messages = []
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content", "")
-            if role == "system":
-                lc_messages.append(SystemMessage(content=content))
-            elif role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                # 可能含 tool_calls
-                kwargs: dict[str, Any] = {"content": content or ""}
-                if m.get("tool_calls"):
-                    kwargs["tool_calls"] = m["tool_calls"]
-                lc_messages.append(AIMessage(**kwargs))
-            elif role == "tool":
-                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
-        return await llm.ainvoke(lc_messages)
+        return await llm.ainvoke(_to_lc_messages(messages))
 
     async def astream(self, messages: list[dict], tools: list | None = None):
         """流式生成，yield chunk"""
         if self._llm is None:
             raise RuntimeError("LLM 未初始化")
         llm = self.bind_tools(tools) if tools else self._llm
-        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-
-        lc_messages = []
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content", "")
-            if role == "system":
-                lc_messages.append(SystemMessage(content=content))
-            elif role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                kwargs: dict[str, Any] = {"content": content or ""}
-                if m.get("tool_calls"):
-                    kwargs["tool_calls"] = m["tool_calls"]
-                lc_messages.append(AIMessage(**kwargs))
-            elif role == "tool":
-                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
-        async for chunk in llm.astream(lc_messages):
+        async for chunk in llm.astream(_to_lc_messages(messages)):
             yield chunk
 
     async def astream_with_retry(self, messages: list[dict], tools: list | None = None):
