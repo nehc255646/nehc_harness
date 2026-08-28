@@ -1,12 +1,15 @@
 """文件工具 — read/write/edit/glob/grep (M1 实现)"""
 
 import glob as glob_module
+import logging
 import re
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 from app.core.config import settings
+
+logger = logging.getLogger("harness.files")
 
 
 def _workdir() -> Path:
@@ -18,16 +21,14 @@ def _workdir() -> Path:
     return p
 
 
-def _resolve(path: str) -> Path:
-    """约束在 WORKDIR 内，防止越权 (M1 简易)"""
+def _resolve(path: str) -> Path | None:
+    """约束在 WORKDIR 内，越权路径直接拒绝 (返回 None)"""
     wd = _workdir()
     target = (wd / path).resolve()
-    # 允许 WORKDIR 本身及子路径；若越权则仍限制在 wd 内
     try:
         target.relative_to(wd)
     except ValueError:
-        # 越权尝试，固定回 wd
-        target = (wd / Path(path).name).resolve()
+        return None
     return target
 
 
@@ -35,6 +36,8 @@ def _resolve(path: str) -> Path:
 def read(path: str) -> str:
     """读取文件内容。参数: path (相对于 WORKDIR)"""
     target = _resolve(path)
+    if target is None:
+        return f"[错误] 越权路径: {path}"
     if not target.exists():
         return f"[错误] 文件不存在: {path}"
     if target.is_dir():
@@ -53,6 +56,8 @@ def read(path: str) -> str:
 def write(path: str, content: str) -> str:
     """写入文件（覆盖）。参数: path, content"""
     target = _resolve(path)
+    if target is None:
+        return f"[错误] 越权路径: {path}"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -65,14 +70,16 @@ def write(path: str, content: str) -> str:
 def edit(path: str, old_string: str, new_string: str) -> str:
     """精确字符串替换。参数: path, old_string, new_string。old_string 必须唯一匹配。"""
     target = _resolve(path)
+    if target is None:
+        return f"[错误] 越权路径: {path}"
     if not target.exists():
         return f"[错误] 文件不存在: {path}"
     try:
         text = target.read_text(encoding="utf-8", errors="ignore")
         if old_string not in text:
-            return f"[错误] 未找到 old_string"
+            return "[错误] 未找到 old_string"
         if text.count(old_string) > 1:
-            return f"[错误] old_string 匹配到多处，请提供更大上下文"
+            return "[错误] old_string 匹配到多处，请提供更大上下文"
         text = text.replace(old_string, new_string, 1)
         target.write_text(text, encoding="utf-8")
         return f"[成功] 已编辑 {path}"
@@ -84,6 +91,8 @@ def edit(path: str, old_string: str, new_string: str) -> str:
 def glob(pattern: str) -> str:
     """按 glob 匹配文件。参数: pattern (如 **/*.py)"""
     wd = _workdir()
+    if pattern.lstrip().startswith(("/", "..")):
+        return f"[错误] 越权路径: {pattern}"
     try:
         matches = glob_module.glob(pattern, root_dir=str(wd), recursive=True)
         if not matches:
@@ -107,6 +116,8 @@ def grep(pattern: str, path: str = ".") -> str:
         return f"[错误] 正则错误: {e}"
     results: list[str] = []
     search_root = _resolve(path) if path != "." else wd
+    if search_root is None:
+        return f"[错误] 越权路径: {path}"
     if search_root.is_file():
         files = [search_root]
     else:
@@ -119,7 +130,8 @@ def grep(pattern: str, path: str = ".") -> str:
             continue
         try:
             text = f.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        except Exception as e:
+            logger.debug("grep read failed: %s", e)
             continue
         for i, line in enumerate(text.splitlines(), 1):
             if regex.search(line):

@@ -1,6 +1,7 @@
 """shell 工具 — subprocess 进程组 (M1 实现)"""
 
 import asyncio
+import logging
 import os
 import signal
 import subprocess
@@ -9,6 +10,8 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from app.core.config import settings
+
+logger = logging.getLogger("harness.shell")
 
 
 def _workdir() -> Path:
@@ -19,8 +22,8 @@ def _workdir() -> Path:
     return p
 
 
-# 跟踪当前 shell 进程组，用于 agent.stop 回收
-_active_pgs: set[int] = set()
+# 跟踪 shell 进程组，按 agent 分组，供 agent.stop 定向回收
+_active_pgs: dict[str, set[int]] = {}
 
 
 @tool
@@ -37,6 +40,7 @@ def shell(command: str) -> str:
             text=True,
             timeout=settings.shell_timeout,
             start_new_session=True,
+            check=False,
         )
         output = (result.stdout or "") + (result.stderr or "")
         if not output:
@@ -53,10 +57,11 @@ def shell(command: str) -> str:
         return f"[错误] 执行失败: {e}"
 
 
-async def shell_async(command: str, timeout: int | None = None) -> tuple[str, int]:
+async def shell_async(command: str, timeout: int | None = None, group: str | None = None) -> tuple[str, int]:
     """异步 shell 执行，含进程组回收，返回 (output, returncode)"""
     wd = _workdir()
     timeout = timeout or settings.shell_timeout
+    key = group or "global"
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=str(wd),
@@ -64,12 +69,13 @@ async def shell_async(command: str, timeout: int | None = None) -> tuple[str, in
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
-    # 记录 pgid
+    # 记录 pgid (按 agent 分组)
+    pgid: int | None = None
     try:
         pgid = os.getpgid(proc.pid)  # type: ignore
-        _active_pgs.add(pgid)
-    except Exception:
-        pass
+        _active_pgs.setdefault(key, set()).add(pgid)
+    except Exception as e:
+        logger.debug("Track pgid failed: %s", e)
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -81,37 +87,44 @@ async def shell_async(command: str, timeout: int | None = None) -> tuple[str, in
                 output = output[:4000] + f"\n...[截断 {len(output)-8000} 字符]...\n" + output[-4000:]
             output = f"[退出码 {proc.returncode}]\n" + output
         return output, proc.returncode or 0
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # 超时 killpg
         try:
-            pgid = os.getpgid(proc.pid)  # type: ignore
-            os.killpg(pgid, signal.SIGTERM)
+            if pgid:
+                os.killpg(pgid, signal.SIGTERM)
             await asyncio.sleep(1)
-            if proc.returncode is None:
+            if proc.returncode is None and pgid:
                 os.killpg(pgid, signal.SIGKILL)
-        except Exception:
+        except Exception as e:
+            logger.debug("Killpg failed: %s", e)
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as e2:
+                logger.debug("Proc kill failed: %s", e2)
         try:
             await proc.communicate()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Communicate after timeout failed: %s", e)
         return f"[错误] 命令超时 ({timeout}s): {command[:100]}", 124
     finally:
-        try:
-            pgid = os.getpgid(proc.pid)  # type: ignore
-            _active_pgs.discard(pgid)
-        except Exception:
-            pass
+        if pgid:
+            s = _active_pgs.get(key)
+            if s:
+                s.discard(pgid)
+                if not s:
+                    _active_pgs.pop(key, None)
 
 
-def kill_all_shell_groups():
-    """agent.stop 时回收全部 shell 进程组"""
-    for pgid in list(_active_pgs):
+def kill_shell_group(group: str) -> None:
+    """回收指定 agent 的 shell 进程组"""
+    for pgid in list(_active_pgs.get(group, ())):
         try:
             os.killpg(pgid, signal.SIGTERM)
-        except Exception:
-            pass
-    # 延时后 SIGKILL 由 caller 处理
+        except Exception as e:
+            logger.debug("Kill shell group failed: %s", e)
+
+
+def kill_all_shell_groups() -> None:
+    """回收全部 shell 进程组 (stop_all 兜底)"""
+    for group in list(_active_pgs):
+        kill_shell_group(group)

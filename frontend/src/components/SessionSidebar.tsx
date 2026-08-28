@@ -1,10 +1,8 @@
-import { useState } from "react";
 import { useAgentStore } from "../store/agentStore";
 import { wsClient } from "../api/ws";
 
 export default function SessionSidebar() {
-  const { sessionId } = useAgentStore();
-  const [sessions] = useState<string[]>(["default"]);
+  const { sessionId, sessions } = useAgentStore();
 
   return (
     <aside className="w-60 border-r border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-2">

@@ -1,6 +1,5 @@
 """全量配置 — 对应 PLAN.md §10"""
 
-import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +15,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # Security
-    encryption_key: str = "8XkJ2pLq9vN3mR4tY7wZ0aBcDeFgHiJkLmNoPqRsTuVw="
+    encryption_key: str = "Fai5ivmUmRw2LvpEMDBbxzHiVBAVSnTS8A5QP1akHuo="
 
     # Server
     host: str = "0.0.0.0"
@@ -51,26 +50,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    def model_post_init(self, __context):
-        # 兼容 OPENAI_* 环境变量 (不经 pydantic 校验)
-        if not self.openai_api_key:
-            self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not self.openai_base_url:
-            self.openai_base_url = os.getenv("OPENAI_BASE_URL")
-        if not self.openai_model:
-            self.openai_model = os.getenv("OPENAI_MODEL") or os.getenv("MODEL_NAME")
-
     @property
     def mysql_dsn(self) -> str:
         return (
             f"mysql+aiomysql://{self.mysql_user}:{self.mysql_password}"
-            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
-        )
-
-    @property
-    def mysql_dsn_asyncmy(self) -> str:
-        return (
-            f"mysql+asyncmy://{self.mysql_user}:{self.mysql_password}"
             f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
         )
 

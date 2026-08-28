@@ -16,8 +16,7 @@ from app.permissions.rules import (
     is_shell_prefix_allowed,
     is_tool_allowed,
 )
-
-READONLY_TOOLS = {"read", "glob", "grep"}
+from app.tools.registry import READONLY_TOOLS
 
 
 def check_policy(tool_name: str, args: dict, session_rules: list[dict]) -> tuple[str, str, bool]:

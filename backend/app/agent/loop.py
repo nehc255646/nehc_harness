@@ -4,8 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections import deque
-from typing import Any, Callable
+from collections.abc import Callable
 
 from app.agent.context import build_messages, truncate_tool_result
 from app.agent.executor import Executor
@@ -54,6 +53,8 @@ class AgentLoop:
     def _ensure_running(self):
         if self._task is None or self._task.done():
             self._stop_event.clear()
+            self._round = 0
+            self.state = "idle"
             self._task = asyncio.create_task(self.run())
             logger.info("AgentLoop task started: session=%s", self.session_id)
 
@@ -67,13 +68,13 @@ class AgentLoop:
                 break
         # 拒绝所有 pending 审批
         gate.reject_all_for_session(self.session_id, reason="stopped")
-        # 回收 shell 进程组
+        # 回收本 agent 的 shell 进程组
         try:
-            from app.tools.shell import kill_all_shell_groups
+            from app.tools.shell import kill_shell_group
 
-            kill_all_shell_groups()
-        except Exception:
-            pass
+            kill_shell_group(self.agent_id)
+        except Exception as e:
+            logger.debug("Kill shell group failed: %s", e)
         self.state = "done"
         await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
         if self._task:
@@ -97,8 +98,8 @@ class AgentLoop:
                 from app.api.ws import broadcast
 
                 await broadcast(self.session_id, event, payload)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Fallback broadcast failed: %s", e)
 
     # ---------- 主循环 ----------
 
@@ -120,8 +121,8 @@ class AgentLoop:
                         await self._handle_incoming(event)
                     except asyncio.CancelledError:
                         break
-                    except Exception as e:
-                        logger.exception("Queue handling failed: %s", e)
+                    except Exception:
+                        logger.exception("Queue handling failed")
                         continue
                 else:
                     # 非 idle：drain 所有积压事件 (非阻塞)
@@ -133,21 +134,6 @@ class AgentLoop:
                             break
                     for ev in drained:
                         await self._handle_incoming(ev)
-
-                # 检查是否需要退出 (done 终态但可被新消息唤醒 — PLAN §2.5)
-                if self.state == "done":
-                    # done 后等待新消息唤醒
-                    try:
-                        event = await self.queue.get()
-                        if self._stop_event.is_set():
-                            break
-                        # 新 run
-                        self.state = "running"
-                        self._round = 0
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
-                        await self._handle_incoming(event)
-                    except asyncio.CancelledError:
-                        break
 
                 # 2. 构造 messages
                 messages = self._build_messages()
@@ -163,13 +149,13 @@ class AgentLoop:
                 try:
                     result = await self._call_model(messages)
                 except Exception as e:
-                    logger.exception("Model call failed: %s", e)
+                    logger.exception("Model call failed")
                     # 降级：若模型不可用，走 heuristic 演示，避免无限重试
                     try:
                         result = self._heuristic_fallback(messages)
                         result["streamed"] = False
                         logger.info("Fallback to heuristic after model error")
-                    except Exception as he:
+                    except Exception:
                         await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
                         self.state = "error"
                         await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
@@ -227,6 +213,9 @@ class AgentLoop:
                         # 空响应也进 idle
                         text = "(模型无返回)"
                         await self._emit_message(text, done=True)
+                    elif already_streamed:
+                        # 真实模型流式已推送，补 history 供下一轮上下文
+                        self.history.append({"role": "assistant", "content": text})
                     self.state = "idle"
                     await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "idle"})
                     # 阻塞等待下一事件在下一轮循环开头处理
@@ -235,7 +224,7 @@ class AgentLoop:
         except asyncio.CancelledError:
             logger.info("AgentLoop cancelled: %s", self.session_id)
         except Exception as e:
-            logger.exception("AgentLoop crashed: %s", e)
+            logger.exception("AgentLoop crashed")
             self.state = "error"
             await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
             await self._broadcast("error", {"code": ErrorCode.INTERNAL, "message": str(e)})
@@ -280,7 +269,7 @@ class AgentLoop:
         tool_calls_acc: dict[int, dict] = {}
 
         try:
-            async for chunk in self.executor.astream(messages, TOOLS):
+            async for chunk in self.executor.astream_with_retry(messages, TOOLS):
                 # chunk 可能是 AIMessageChunk
                 delta = getattr(chunk, "content", "") or ""
                 if delta:
@@ -439,58 +428,63 @@ class AgentLoop:
         """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回"""
 
         async def _run_one(tc: dict) -> dict:
-            name = tc["name"]
-            args = tc["args"] or {}
-            call_id = tc["id"]
-            # finish_task 直接处理
-            if name == "finish_task":
-                await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
-                result = f"[完成] {args.get('message', '任务完成')}"
-                await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
-                return {"call_id": call_id, "name": name, "result": result, "is_error": False}
-
-            # 1. policy 判定
-            session_rules = gate.get_session_rules(self.session_id)
-            decision, reason, needs_approval = check_policy(name, args, session_rules)
-
-            if decision == "blocked":
-                await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
-                result = f"[拒绝] {reason} (decision=blocked)"
-                await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
-                # 审计日志：blocked
-                return {"call_id": call_id, "name": name, "result": result, "is_error": True}
-
-            if not needs_approval:
-                # 直接执行
-                return await self._execute_tool(name, args, call_id, decision, reason)
-
-            # 需审批 → 挂起 Future
-            approval_id, future = await gate.request_approval(self.session_id, self.agent_id, name, args, reason)
-            await self._broadcast("approval.request", {"approval_id": approval_id, "tool": name, "args": args, "reason": reason})
-            await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
-            # 等待审批 (带超时)
+            call_id = tc.get("id") or ""
+            name = tc.get("name") or ""
+            args = tc.get("args") or {}
             try:
-                approved, decision_val, resolve_reason = await asyncio.wait_for(future, timeout=settings.approval_timeout)
-            except asyncio.TimeoutError:
-                gate.resolve(approval_id, "timeout", "timeout")
-                await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": False, "reason": "timeout"})
-                result = f"[超时] 审批超时 ({settings.approval_timeout}s)，已拒绝: {name}"
-                await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
-                return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                # finish_task 直接处理
+                if name == "finish_task":
+                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    result = f"[完成] {args.get('message', '任务完成')}"
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": False}
 
-            # 已 resolve
-            await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": approved, "reason": resolve_reason})
-            if not approved:
-                result = f"[拒绝] 用户拒绝: {reason} (decision={decision_val})"
-                await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
-                return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                # 1. policy 判定
+                session_rules = gate.get_session_rules(self.session_id)
+                decision, reason, needs_approval = check_policy(name, args, session_rules)
 
-            # 批准 → 执行
-            return await self._execute_tool(name, args, call_id, f"approved_{decision_val}", reason)
+                if decision == "blocked":
+                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    result = f"[拒绝] {reason} (decision=blocked)"
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+
+                if not needs_approval:
+                    # 直接执行
+                    return await self._execute_tool(name, args, call_id, decision, reason)
+
+                # 需审批 → 挂起 Future (tool.start 由 _execute_tool 执行时广播，避免重复)
+                approval_id, future = await gate.request_approval(self.session_id, self.agent_id, name, args, reason)
+                await self._broadcast("approval.request", {"approval_id": approval_id, "tool": name, "args": args, "reason": reason})
+                # 等待审批 (带超时)
+                try:
+                    approved, decision_val, resolve_reason = await asyncio.wait_for(future, timeout=settings.approval_timeout)
+                except TimeoutError:
+                    gate.resolve(approval_id, "timeout", "timeout")
+                    await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": False, "reason": "timeout"})
+                    result = f"[超时] 审批超时 ({settings.approval_timeout}s)，已拒绝: {name}"
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+
+                # 已 resolve
+                await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": approved, "reason": resolve_reason})
+                if not approved:
+                    result = f"[拒绝] 用户拒绝: {reason} (decision={decision_val})"
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+
+                # 批准 → 执行
+                return await self._execute_tool(name, args, call_id, f"approved_{decision_val}", reason)
+            except Exception as e:
+                # 单个工具失败不影响同轮其他工具
+                result = f"[异常] 工具 {name} 分发失败: {e}"
+                await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                logger.exception("Tool dispatch error: %s", name)
+                return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
         # 并行 gather
-        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
-        return list(results)
+        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
+        return [r for r in results if not isinstance(r, BaseException)]
 
     async def _execute_tool(self, name: str, args: dict, call_id: str, decision: str, reason: str) -> dict:
         await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
@@ -499,10 +493,10 @@ class AgentLoop:
         try:
             if name == "shell":
                 command = args.get("command") or args.get("cmd") or ""
-                # 异步执行
+                # 异步执行 (进程组按 agent 分组，供 stop 定向回收)
                 from app.tools.shell import shell_async
 
-                output, code = await shell_async(command)
+                output, code = await shell_async(command, group=self.agent_id)
                 result = output
                 is_error = code != 0 and code != 124  # 124 为超时
             else:

@@ -31,6 +31,6 @@ async def close_redis() -> None:
     if _client is not None:
         try:
             await _client.aclose()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis close failed: %s", e)
         _client = None

@@ -9,8 +9,10 @@ type State = {
   messages: Message[];
   toolCalls: ToolCall[];
   pendingApprovals: Approval[];
+  sessionAllowRules: { kind: string; pattern: string }[];
   connectionState: "connecting" | "connected" | "disconnected" | "error";
   sessionId: string;
+  sessions: string[];
   sendMessage: (content: string) => void;
   respondApproval: (approval_id: string, decision: "approve" | "approve_similar" | "reject") => void;
   connect: (sessionId?: string) => void;
@@ -20,8 +22,10 @@ export const useAgentStore = create<State>((set, get) => ({
   messages: [],
   toolCalls: [],
   pendingApprovals: [],
+  sessionAllowRules: [],
   connectionState: "connecting",
   sessionId: "default",
+  sessions: ["default"],
 
   connect: (sessionId) => {
     const sid = sessionId || get().sessionId;
@@ -32,8 +36,22 @@ export const useAgentStore = create<State>((set, get) => ({
     wsClient.on("connection", (p) => set({ connectionState: p.state as State["connectionState"] }));
 
     wsClient.on("session.hello", (p) => {
-      // 断线恢复对账 — PLAN.md §2.5
-      if (Array.isArray(p.pending_approvals)) set({ pendingApprovals: p.pending_approvals as Approval[] });
+      // 断线恢复对账 — PLAN.md §2.5；新会话 (session 变化) 时清空展示
+      const sid2 = p.session_id as string;
+      set((s) => ({
+        sessionId: sid2,
+        sessions: s.sessions.includes(sid2) ? s.sessions : [...s.sessions, sid2],
+        messages: sid2 === s.sessionId ? s.messages : [],
+        toolCalls: sid2 === s.sessionId ? s.toolCalls : [],
+        pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
+        sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
+      }));
+    });
+
+    wsClient.on("session.update", (p) => {
+      if (Array.isArray(p.session_allow_rules)) {
+        set({ sessionAllowRules: p.session_allow_rules as State["sessionAllowRules"] });
+      }
     });
 
     wsClient.on("message.start", (p) => {
@@ -76,7 +94,8 @@ export const useAgentStore = create<State>((set, get) => ({
   sendMessage: (content) => {
     const sid = get().sessionId;
     const localId = `local-${Date.now()}`;
-    set((s) => ({ messages: [...s.messages, { id: localId, role: "user", content }] }));
+    // 新 run 开始，清空上一轮的 tool 卡片
+    set((s) => ({ messages: [...s.messages, { id: localId, role: "user", content }], toolCalls: [] }));
     wsClient.send("message.send", { session_id: sid, content });
   },
 

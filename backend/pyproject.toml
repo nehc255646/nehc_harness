@@ -11,7 +11,6 @@ dependencies = [
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.30",
     "aiomysql>=0.2.0",
-    "asyncmy>=0.2.9",
     "alembic>=1.13",
     "redis[hiredis]>=5.2",
     "langchain>=1.0",
@@ -43,9 +42,14 @@ packages = ["app"]
 line-length = 100
 target-version = "py314"
 
+[tool.ruff.lint]
+# 工具/网络/io 容错路径的盲捕获是刻意设计 (全捕获+记录)
+ignore = ["BLE001"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+timeout = 60
 
 [tool.alembic]
 script_location = "alembic"
@@ -56,4 +60,5 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.8",
+    "pytest-timeout>=2.4.0",
 ]

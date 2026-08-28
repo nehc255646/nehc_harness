@@ -27,8 +27,8 @@ async def broadcast(session_id: str, event: str, payload: dict):
     for ws in conns:
         try:
             await ws.send_text(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Broadcast send failed: %s", e)
 
 
 # 供 AgentLoop 回调
@@ -75,7 +75,8 @@ async def ws_endpoint(ws: WebSocket):
         )
     )
 
-    heartbeat_task = asyncio.create_task(_heartbeat(ws))
+    pong_evt: asyncio.Event = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_heartbeat(ws, pong_evt))
 
     try:
         while True:
@@ -91,6 +92,9 @@ async def ws_endpoint(ws: WebSocket):
 
             if event == "ping":
                 await ws.send_text(json.dumps({"event": "pong", "payload": {}}))
+
+            elif event == "pong":
+                pong_evt.set()
 
             elif event == "message.send":
                 content = payload.get("content", "")
@@ -135,6 +139,14 @@ async def ws_endpoint(ws: WebSocket):
 
             elif event == "session.create":
                 new_id = str(uuid.uuid4())
+                # 将当前连接迁移到新会话，事件广播随新 session 路由
+                old_conns = _connections.get(session_id)
+                if old_conns and ws in old_conns:
+                    old_conns.remove(ws)
+                session_id = new_id
+                _connections.setdefault(session_id, set()).add(ws)
+                new_agent = manager.get_or_create(session_id)
+                new_agent.set_broadcaster(_loop_broadcaster)
                 await ws.send_text(
                     json.dumps(
                         {
@@ -142,7 +154,7 @@ async def ws_endpoint(ws: WebSocket):
                             "payload": {
                                 "session_id": new_id,
                                 "title": payload.get("title", "New Session"),
-                                "agent_state": "idle",
+                                "agent_state": new_agent.state,
                                 "pending_approvals": [],
                                 "session_allow_rules": [],
                                 "subagent_panels": [],
@@ -193,11 +205,11 @@ async def ws_endpoint(ws: WebSocket):
         # 断连兜底：若该会话无连接，超时后自动拒绝? M1 仅记录，实时超路由由 gate 超时处理
         # 此处不立即拒绝，留给 APPROVAL_TIMEOUT
     except Exception as e:
-        logger.exception("WS error: %s", e)
+        logger.exception("WS error")
         try:
             await ws.send_text(json.dumps({"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": str(e)}}))
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.debug("WS error send failed: %s", e2)
     finally:
         heartbeat_task.cancel()
         try:
@@ -212,13 +224,27 @@ async def ws_endpoint(ws: WebSocket):
                 # 延迟拒绝 pending? 保留超时机制，不立即清理
 
 
-async def _heartbeat(ws: WebSocket):
+async def _heartbeat(ws: WebSocket, pong_evt: asyncio.Event):
+    """发送 ping 并跟踪 pong，连续 3 次未响应判死关闭 (PLAN §3)"""
+    miss = 0
     try:
         while True:
-            await asyncio.sleep(settings.heartbeat_interval_s)
             try:
                 await ws.send_text(json.dumps({"event": "ping", "payload": {}}))
             except Exception:
                 break
+            try:
+                await asyncio.wait_for(pong_evt.wait(), timeout=settings.heartbeat_interval_s)
+                pong_evt.clear()
+                miss = 0
+            except TimeoutError:
+                miss += 1
+                if miss >= 3:
+                    logger.info("WS heartbeat 3 misses, closing: session=%s", id(ws))
+                    try:
+                        await ws.close()
+                    except Exception as e:
+                        logger.debug("WS close failed: %s", e)
+                    break
     except asyncio.CancelledError:
         pass

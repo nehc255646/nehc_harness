@@ -4,9 +4,6 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
-
-from app.core.config import settings
 
 logger = logging.getLogger("harness.gate")
 
@@ -76,6 +73,11 @@ class ApprovalGate:
             logger.warning("Approval not found or already resolved: %s", approval_id)
             return False
         if pending.future.done():
+            # 已被 wait_for 超时取消：仅清理残留，不再写结果
+            if pending.future.cancelled():
+                self._pending.pop(approval_id, None)
+                logger.info("Approval cleaned after cancel: %s", approval_id)
+                return True
             return False
 
         # 会话放行规则写入 (approve_similar)

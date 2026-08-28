@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from app.core.config import settings
@@ -109,6 +108,23 @@ class Executor:
                 lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
         async for chunk in llm.astream(lc_messages):
             yield chunk
+
+    async def astream_with_retry(self, messages: list[dict], tools: list | None = None):
+        """流式生成 + 指数退避重试 — loop 主调用入口"""
+        last_err: Exception | None = None
+        for attempt in range(self.retry_count + 1):
+            try:
+                async for chunk in self.astream(messages, tools):
+                    yield chunk
+                return
+            except Exception as e:
+                last_err = e
+                if attempt < self.retry_count:
+                    delay = 2**attempt
+                    logger.warning("LLM 流式失败，%ss 后重试 (%d/%d): %s", delay, attempt + 1, self.retry_count, e)
+                    await asyncio.sleep(delay)
+                else:
+                    raise last_err
 
     async def invoke_with_retry(self, messages: list[dict], tools: list | None = None):
         last_err = None

@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.rest import router as rest_router
 from app.api.ws import router as ws_router
-from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.redis import close_redis, get_redis
 

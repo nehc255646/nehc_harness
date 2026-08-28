@@ -35,6 +35,7 @@ export class HarnessWS {
     this.ws.onmessage = (e) => {
       try {
         const msg: WSEvent = JSON.parse(e.data);
+        if (msg.event === "ping") this.send("pong");
         this.emit(msg.event, msg.payload);
         this.emit("*", msg as unknown as Record<string, unknown>);
       } catch {
