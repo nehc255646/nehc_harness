@@ -1,8 +1,8 @@
-import { useAgentStore } from "../store/agentStore";
 import { wsClient } from "../api/ws";
+import { useAgentStore } from "../store/agentStore";
 
 export default function SessionSidebar() {
-  const { sessionId, sessions } = useAgentStore();
+  const { sessionId, sessionRows, deleteSession } = useAgentStore();
 
   return (
     <aside className="w-60 border-r border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-2">
@@ -12,20 +12,32 @@ export default function SessionSidebar() {
       >
         + 新建会话
       </button>
-      <div className="mt-2 space-y-1">
-        {sessions.map((s) => (
-          <button
-            key={s}
-            onClick={() => {
-              if (s !== sessionId) wsClient.send("session.select", { session_id: s });
-            }}
-            className={`w-full rounded px-2 py-1 text-left text-sm truncate ${s === sessionId ? "bg-zinc-900 text-cyan-400" : "text-zinc-400 hover:bg-zinc-900"}`}
+      <div className="mt-2 space-y-1 overflow-y-auto">
+        {sessionRows.map((s) => (
+          <div
+            key={s.id}
+            className={`group flex items-center rounded px-2 py-1 text-sm ${s.id === sessionId ? "bg-zinc-900 text-cyan-400" : "text-zinc-400 hover:bg-zinc-900"}`}
           >
-            {s}
-          </button>
+            <button
+              className="min-w-0 flex-1 truncate text-left"
+              onClick={() => {
+                if (s.id !== sessionId) wsClient.send("session.select", { session_id: s.id });
+              }}
+              title={s.title}
+            >
+              {s.title || s.id.slice(0, 8)}
+            </button>
+            <button
+              className="ml-1 hidden text-xs text-zinc-600 hover:text-red-400 group-hover:block"
+              onClick={() => deleteSession(s.id)}
+              title="删除"
+            >
+              ×
+            </button>
+          </div>
         ))}
       </div>
-      <p className="mt-auto text-xs text-zinc-600">M5 多会话侧栏占位</p>
+      <p className="mt-auto text-xs text-zinc-600">会话持久化于 MySQL</p>
     </aside>
   );
 }

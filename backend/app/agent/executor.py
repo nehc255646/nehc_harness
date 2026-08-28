@@ -1,5 +1,7 @@
 """LangChain ChatOpenAI 封装 + 重试退避"""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import Any
@@ -31,8 +33,48 @@ class Executor:
         self.api_key = api_key or settings.openai_api_key or "sk-test"
         self.temperature = temperature
         self.retry_count = retry_count if retry_count is not None else settings.retry_count
+        self.context_window = 128000
+        self.model_pk: int | None = None
         self._llm = None
         self._init_llm()
+
+    @classmethod
+    async def from_session_id(cls, session_id: str) -> Executor:
+        """Session.model_id → Model → Provider.base_url + api_key + model.model_id"""
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        from app.core.crypto import decrypt_secret
+        from app.core.db import is_available, session_scope
+        from app.models import ChatSession, Model
+
+        if is_available():
+            try:
+                async with session_scope() as db:
+                    if db is not None:
+                        sess = await db.get(ChatSession, session_id)
+                        if sess and sess.model_id:
+                            model = (
+                                await db.scalars(
+                                    select(Model)
+                                    .options(selectinload(Model.provider))
+                                    .where(Model.id == sess.model_id)
+                                )
+                            ).first()
+                            if model and model.provider:
+                                key = decrypt_secret(model.provider.api_key_encrypted)
+                                inst = cls(
+                                    model=model.model_id,
+                                    base_url=model.provider.base_url,
+                                    api_key=key,
+                                    temperature=model.temperature,
+                                )
+                                inst.context_window = model.context_window
+                                inst.model_pk = model.id
+                                return inst
+            except Exception as e:
+                logger.warning("Executor.from_session_id failed, fallback env: %s", e)
+        return cls()
 
     def _init_llm(self):
         if ChatOpenAI is None:

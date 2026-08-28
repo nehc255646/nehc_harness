@@ -18,12 +18,15 @@ class AgentManager:
         for agent in self._agents.values():
             agent.set_broadcaster(fn)
 
-    def get_or_create(self, session_id: str) -> AgentLoop:
+    async def get_or_create(self, session_id: str) -> AgentLoop:
         if session_id not in self._agents:
             agent = AgentLoop(session_id, broadcaster=self._broadcast_fn)
             self._agents[session_id] = agent
             logger.info("Agent created: %s", session_id)
-            # 异步启动
+            try:
+                await agent.hydrate_from_db()
+            except Exception:
+                logger.exception("hydrate_from_db failed: %s", session_id)
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(agent.start())
@@ -33,6 +36,14 @@ class AgentManager:
 
     def get(self, session_id: str) -> AgentLoop | None:
         return self._agents.get(session_id)
+
+    async def drop(self, session_id: str):
+        agent = self._agents.pop(session_id, None)
+        if agent:
+            try:
+                await agent.stop()
+            except Exception:
+                logger.exception("stop on drop failed: %s", session_id)
 
     def all_ids(self) -> list[str]:
         return list(self._agents.keys())

@@ -45,3 +45,16 @@
 
 ## 待办 M3
 - SQLAlchemy + Alembic + MySQL 持久化 + Provider/Model 分组 + 会话续聊
+
+## M3 — 持久化 (已完成 2026-08-28)
+- 建库 `harness` + 用户 `harness`@localhost；Alembic `0001_m3`：Provider/Model/AppConfig/Session/Message/ToolLog/SubAgentRun
+- 落库点：用户消息 / `message.done`（含 tool_calls 回填）/ `tool.result`→ToolLog / 子 agent spawn+finish；失败入内存待写队列，loop drain 时 `flush_pending`
+- 重启路径：`AgentLoop.hydrate_from_db` 从 Message 按自增 id + Session.summary 重建上下文；`Executor.from_session_id` 按 Session.model_id → Provider 解密 key
+- REST：会话 CRUD/历史/tool-logs/审批详情；Provider/Model CRUD；`POST /providers/{id}/test` hello 探测（失败可仍保存）；`GET /models/resolved-default`（上一次使用 > 兜底 > 空）；`GET/PUT /config/default-model`；删除 Model 时清空兜底
+- 库为空且配置了 OPENAI_* 时导入 env Provider/Model，不自动设兜底
+- 前端：启动拉会话列表/历史续聊；顶栏选模型；无模型且已有模型列表时阻拦发送；模型/供应商设置弹窗
+- MySQL 不可用降级内存运行；pytest 跨 loop 用 NullPool + 按 event loop 重建引擎
+- 验证：`ruff` 0 告警 / `pytest 42 passed` / `tsc` / `eslint` / `vite build`；REST 会话+模型闭环单测
+
+## 待办 M4
+- Redis 全面：agent 状态 TTL、pending 审批、会话放行规则、断线 hello 对账、摘要缓存增量合并

@@ -8,21 +8,28 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.rest import router as rest_router
 from app.api.ws import router as ws_router
-from app.core.config import settings
+from app.core.crypto import encryption_ready
+from app.core.db import close_db, init_db
 from app.core.logging import setup_logging
 from app.core.redis import close_redis, get_redis
+from app.persist import maybe_import_env_provider
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    if not settings.encryption_key:
-        # M3 起 api_key 加密依赖该密钥，缺失时明确告警
-        logging.getLogger("harness").warning("ENCRYPTION_KEY 未配置 — Provider api_key 加密将不可用")
-    # Redis 尝试连接，连不上仅告警
+    log = logging.getLogger("harness")
+    if not encryption_ready():
+        log.warning("ENCRYPTION_KEY 未配置或非法 — Provider api_key 加密将不可用")
+    await init_db()
+    try:
+        await maybe_import_env_provider()
+    except Exception:
+        log.exception("env 导入 Provider 失败")
     await get_redis()
     yield
     await close_redis()
+    await close_db()
 
 
 app = FastAPI(title="Agent Harness", version="0.1.0", lifespan=lifespan)

@@ -6,11 +6,15 @@ import time
 import uuid
 from collections.abc import Callable
 
+from app import persist as persist_mod
 from app.agent.context import (
     accumulate_tool_calls,
     build_messages,
+    estimate_tokens,
     parse_tool_calls,
+    should_summarize,
     truncate_tool_result,
+    window_slice,
 )
 from app.agent.executor import Executor
 from app.agent.prompts import SYSTEM_PROMPT
@@ -60,6 +64,16 @@ class AgentLoop:
 
     async def start(self):
         self._ensure_running()
+
+    async def hydrate_from_db(self):
+        """M3: 从 DB 历史 + 摘要重建上下文，并按会话模型实例化 executor。"""
+        hist, summary, _mid = await persist_mod.load_history(self.session_id)
+        if hist:
+            self.history = hist
+            logger.info("Hydrated %d messages for session=%s", len(hist), self.session_id)
+        if summary:
+            self.summary = summary
+        self.executor = await Executor.from_session_id(self.session_id)
 
     def _ensure_running(self):
         if self._task is None or self._task.done():
@@ -123,6 +137,10 @@ class AgentLoop:
 
         try:
             while not self._stop_event.is_set():
+                try:
+                    await persist_mod.flush_pending()
+                except Exception:
+                    logger.debug("flush_pending failed", exc_info=True)
                 # 1. drain 队列 (阻塞等待下一事件，若 idle)
                 if not self.history or self.state == "idle":
                     # idle 时阻塞等待
@@ -148,6 +166,7 @@ class AgentLoop:
                     for ev in drained:
                         await self._handle_incoming(ev)
 
+                await self._maybe_compact()
                 # 2. 构造 messages
                 messages = self._build_messages()
 
@@ -195,6 +214,7 @@ class AgentLoop:
                     elif already_streamed:
                         # 真实模型流式已推送，补 history 供下一轮上下文
                         self.history.append({"role": "assistant", "content": text})
+                        await self._persist_message("assistant", text, public_id=self._current_message_id)
                     else:
                         await self._emit_message(text, done=True)
                     # 进入 idle，等待下一事件
@@ -217,6 +237,12 @@ class AgentLoop:
                     "tool_calls": tool_calls,
                 }
                 self.history.append(assistant_msg)
+                await self._persist_message(
+                    "assistant",
+                    text or "",
+                    public_id=self._current_message_id,
+                    tool_calls=tool_calls,
+                )
                 for tr in tool_results:
                     self.history.append(
                         {
@@ -225,6 +251,12 @@ class AgentLoop:
                             "tool_call_id": tr["call_id"],
                             "name": tr["name"],
                         }
+                    )
+                    await self._persist_message(
+                        "tool",
+                        tr["result"],
+                        tool_call_id=tr["call_id"],
+                        name=tr["name"],
                     )
                 # 大结果截断已在 dispatch 内处理
 
@@ -248,6 +280,7 @@ class AgentLoop:
         if etype == "user_message":
             content = event.get("content", "")
             self.history.append({"role": "user", "content": content})
+            await self._persist_message("user", content)
             # 保证 running
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
@@ -256,7 +289,9 @@ class AgentLoop:
             # M2 交互型异步回投
             result = event.get("result", "")
             sid = event.get("subagent_id", "")
-            self.history.append({"role": "user", "content": f"[子 agent 结果 {sid}]\n{result}"})
+            content = f"[子 agent 结果 {sid}]\n{result}"
+            self.history.append({"role": "user", "content": content})
+            await self._persist_message("user", content)
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
                 await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
@@ -270,6 +305,7 @@ class AgentLoop:
                 lines.append(f"- {w.get('subagent_id')} [{w.get('status')}]: {w.get('result','')[:500]}")
             content = f"[工作型批量完成] batch_id={batch_id}\n" + "\n".join(lines)
             self.history.append({"role": "user", "content": content})
+            await self._persist_message("user", content)
             # 聚合事件也广播，供前端 worker.batch_done 已由子 agent 广播，此处仅注入上下文
             if self.state in ("idle", "done", "error"):
                 self.state = "running"
@@ -281,6 +317,93 @@ class AgentLoop:
         # 滑动窗口最近 N 个 turn (M1 简化：按消息条数取最近 window_n*2)
         window = self.history[-settings.window_n * 2 :] if len(self.history) > settings.window_n * 2 else self.history
         return build_messages(SYSTEM_PROMPT, self.summary, window, [])
+
+    async def _persist_message(
+        self,
+        role: str,
+        content: str,
+        public_id: str | None = None,
+        tool_call_id: str | None = None,
+        tool_calls: list | None = None,
+        name: str | None = None,
+    ):
+        try:
+            await persist_mod.save_message(
+                session_id=self.session_id,
+                agent_id=self.agent_id,
+                role=role,
+                content=content,
+                public_id=public_id,
+                tool_call_id=tool_call_id,
+                tool_calls=tool_calls,
+                name=name,
+            )
+        except Exception:
+            logger.debug("persist message failed", exc_info=True)
+
+    async def _persist_tool_log(
+        self,
+        name: str,
+        args: dict,
+        result: str,
+        call_id: str,
+        is_error: bool,
+        duration_ms: int | None,
+        decision: str | None,
+        rule_hit: str | None = None,
+    ):
+        try:
+            await persist_mod.save_tool_log(
+                session_id=self.session_id,
+                agent_id=self.agent_id,
+                name=name,
+                args=args or {},
+                result=result,
+                tool_call_id=call_id,
+                is_error=is_error,
+                duration_ms=duration_ms,
+                decision=decision,
+                rule_hit=rule_hit,
+                message_public_id=self._current_message_id,
+            )
+        except Exception:
+            logger.debug("persist tool_log failed", exc_info=True)
+
+    async def _maybe_compact(self):
+        """token 超阈值：旧摘要 + 滑出消息合并；失败则丢窗口外并告警。"""
+        tokens = estimate_tokens(self.history, self.summary)
+        ctx = getattr(self.executor, "context_window", None) or 128000
+        if not should_summarize(tokens, ctx, settings.summary_token_ratio):
+            return
+        slid, window = window_slice(self.history, settings.window_n)
+        if not slid:
+            return
+        new_sum = await self._merge_summary(slid)
+        if new_sum:
+            self.summary = new_sum
+        else:
+            logger.warning("摘要失败，丢弃窗口外 %d 条 session=%s", len(slid), self.session_id)
+        self.history = window
+        try:
+            await persist_mod.save_summary(self.session_id, self.summary)
+        except Exception:
+            logger.debug("save_summary failed", exc_info=True)
+
+    async def _merge_summary(self, slid: list[dict]) -> str | None:
+        if self.executor._llm is None:
+            return None
+        text = "\n".join(f"{m.get('role')}: {str(m.get('content', ''))[:800]}" for m in slid)
+        prompt = [
+            {"role": "system", "content": "将对话压缩为简洁摘要，保留任务目标、关键决策、文件变更与未决事项。只输出摘要正文。"},
+            {"role": "user", "content": f"旧摘要:\n{self.summary or '(无)'}\n\n新滑出消息:\n{text}"},
+        ]
+        try:
+            result = await self.executor.ainvoke(prompt)
+            content = getattr(result, "content", None) or str(result)
+            return str(content) if content else None
+        except Exception as e:
+            logger.warning("摘要生成失败: %s", e)
+            return None
 
     async def _call_model(self, messages: list[dict]) -> dict:
         """调用模型，支持流式，返回 {text, tool_calls, streamed}"""
@@ -438,9 +561,11 @@ class AgentLoop:
             await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": chunk})
             await asyncio.sleep(0.02)
         await self._broadcast("message.done", {"message_id": message_id, "role": "assistant", "content": content})
+        self._current_message_id = message_id
         # 落历史 (record=False 时由调用方随 assistant_msg 统一回填，避免重复)
         if record:
             self.history.append({"role": "assistant", "content": content})
+            await self._persist_message("assistant", content, public_id=message_id)
 
     async def _dispatch_tools(self, tool_calls: list[dict]) -> list[dict]:
         """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回（M2 支持 spawn_*）"""
@@ -455,6 +580,7 @@ class AgentLoop:
                     await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
                     result = f"[完成] {args.get('message', '任务完成')}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
+                    await self._persist_tool_log(name, args, result, call_id, False, 0, "config_allow")
                     return {"call_id": call_id, "name": name, "result": result, "is_error": False}
 
                 # M2 spawn_* 直接处理（不走 policy）
@@ -465,6 +591,7 @@ class AgentLoop:
                     result = truncate_tool_result(str(result), settings.max_tool_result_tokens)
                     is_err = result.startswith(("[拒绝]", "[错误]"))
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_err})
+                    await self._persist_tool_log(name, args, result, call_id, is_err, 0, "config_allow")
                     return {"call_id": call_id, "name": name, "result": result, "is_error": is_err}
 
                 # 1. policy 判定
@@ -475,6 +602,7 @@ class AgentLoop:
                     await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
                     result = f"[拒绝] {reason} (decision=blocked)"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", reason)
                     return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
                 if not needs_approval:
@@ -496,6 +624,7 @@ class AgentLoop:
                     await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": False, "reason": "timeout"})
                     result = f"[超时] 审批超时 ({settings.approval_timeout}s)，已拒绝: {name}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    await self._persist_tool_log(name, args, result, call_id, True, 0, "timeout")
                     return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 finally:
                     # 审批结束：本 agent 无其余 pending 时才回运行态（并行多审批场景）；
@@ -510,10 +639,12 @@ class AgentLoop:
                 if not approved:
                     result = f"[拒绝] 用户拒绝: {reason} (decision={decision_val})"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    await self._persist_tool_log(name, args, result, call_id, True, 0, "rejected", reason)
                     return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
                 # 批准 → 执行
-                return await self._execute_tool(name, args, call_id, f"approved_{decision_val}", reason)
+                mapped = "approved_similar" if decision_val == "approve_similar" else "approved_once"
+                return await self._execute_tool(name, args, call_id, mapped, reason)
             except Exception as e:
                 # 单个工具失败不影响同轮其他工具
                 result = f"[异常] 工具 {name} 分发失败: {e}"
@@ -605,12 +736,13 @@ class AgentLoop:
 
             duration_ms = int((time.time() - start) * 1000)
             await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_error})
-            # TODO: 落 ToolLog (M3)，含 decision/duration
+            await self._persist_tool_log(name, args, result, call_id, is_error, duration_ms, decision, reason)
             logger.info("Tool done: %s -> %s (%dms) decision=%s", name, "error" if is_error else "ok", duration_ms, decision)
             return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
         except Exception as e:
             duration_ms = int((time.time() - start) * 1000)
             result = f"[异常] {name} 执行失败: {e}"
             await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+            await self._persist_tool_log(name, args, result, call_id, True, duration_ms, decision, reason)
             logger.exception("Tool error: %s", name)
             return {"call_id": call_id, "name": name, "result": result, "is_error": True}

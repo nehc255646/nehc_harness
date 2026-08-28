@@ -57,42 +57,15 @@ async def ws_endpoint(ws: WebSocket):
     session_id = ws.query_params.get("session_id", "default")
     _connections.setdefault(session_id, set()).add(ws)
     _ensure_manager_broadcaster()
-    # 确保 agent 存在并启动
-    agent = manager.get_or_create(session_id)
+    # 确保会话落库 + agent 存在并启动
+    from app import persist as persist_mod
+
+    await persist_mod.ensure_session(session_id, assign_default=True)
+    agent = await manager.get_or_create(session_id)
     agent.set_broadcaster(_loop_broadcaster)
     logger.info("WS connected: session=%s total=%d state=%s", session_id, len(_connections[session_id]), agent.state)
 
-    # hello 握手 — 对应 PLAN §2.5 断线恢复
-    pending = [
-        {"approval_id": p.approval_id, "tool": p.tool, "args": p.args, "reason": p.reason}
-        for p in gate.list_pending(session_id)
-    ]
-    session_rules = gate.get_session_rules(session_id)
-    try:
-        from app.agent.subagent import get_panels, get_workers
-
-        panels = get_panels(session_id)
-        workers = get_workers(session_id)
-    except Exception:
-        panels = []
-        workers = []
-    await ws.send_text(
-        json.dumps(
-            {
-                "event": "session.hello",
-                "payload": {
-                    "session_id": session_id,
-                    "title": "Session " + session_id[:8],
-                    "agent_state": agent.state,
-                    "pending_approvals": pending,
-                    "session_allow_rules": session_rules,
-                    "subagent_panels": panels,
-                    "workers": workers,
-                },
-            },
-            ensure_ascii=False,
-        )
-    )
+    await _send_hello(ws, session_id, agent)
 
     pong_evt: asyncio.Event = asyncio.Event()
     heartbeat_task = asyncio.create_task(_heartbeat(ws, pong_evt))
@@ -117,9 +90,11 @@ async def ws_endpoint(ws: WebSocket):
 
             elif event == "message.send":
                 content = payload.get("content", "")
-                # 适配前端 payload 含 session_id
                 sid = payload.get("session_id", session_id)
-                target_agent = manager.get_or_create(sid)
+                from app import persist as persist_mod
+
+                await persist_mod.ensure_session(sid)
+                target_agent = await manager.get_or_create(sid)
                 target_agent.set_broadcaster(_loop_broadcaster)
                 await target_agent.enqueue({"type": "user_message", "content": content})
                 # 本次发送立即广播用户消息的落库事件 (可选，前端已本地渲染)
@@ -170,69 +145,37 @@ async def ws_endpoint(ws: WebSocket):
 
             elif event == "session.create":
                 new_id = str(uuid.uuid4())
-                # 将当前连接迁移到新会话，事件广播随新 session 路由
+                title = payload.get("title") or "New Session"
+                from app import persist as persist_mod
+
+                model_id = await persist_mod.resolve_default_model_id()
+                await persist_mod.ensure_session(new_id, title=title, model_id=model_id)
                 _detach_connection(ws, session_id)
                 session_id = new_id
                 _connections.setdefault(session_id, set()).add(ws)
-                new_agent = manager.get_or_create(session_id)
+                new_agent = await manager.get_or_create(session_id)
                 new_agent.set_broadcaster(_loop_broadcaster)
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "event": "session.hello",
-                            "payload": {
-                                "session_id": new_id,
-                                "title": payload.get("title", "New Session"),
-                                "agent_state": new_agent.state,
-                                "pending_approvals": [],
-                                "session_allow_rules": [],
-                                "subagent_panels": [],
-                                "workers": [],
-                            },
-                        },
-                        ensure_ascii=False,
-                    )
-                )
+                await _send_hello(ws, session_id, new_agent)
 
             elif event == "session.select":
-                # 切换会话 — 重新握手
                 new_sid = payload.get("session_id", session_id)
-                # 将当前连接迁移
+                from app import persist as persist_mod
+
+                await persist_mod.ensure_session(new_sid)
                 _detach_connection(ws, session_id)
                 session_id = new_sid
                 _connections.setdefault(session_id, set()).add(ws)
-                new_agent = manager.get_or_create(session_id)
+                new_agent = await manager.get_or_create(session_id)
                 new_agent.set_broadcaster(_loop_broadcaster)
-                pending = [
-                    {"approval_id": p.approval_id, "tool": p.tool, "args": p.args, "reason": p.reason}
-                    for p in gate.list_pending(session_id)
-                ]
-                rules = gate.get_session_rules(session_id)
-                try:
-                    from app.agent.subagent import get_panels, get_workers
+                await _send_hello(ws, session_id, new_agent)
 
-                    panels = get_panels(session_id)
-                    workers = get_workers(session_id)
-                except Exception:
-                    panels = []
-                    workers = []
-                await ws.send_text(
-                    json.dumps(
-                        {
-                            "event": "session.hello",
-                            "payload": {
-                                "session_id": session_id,
-                                "title": "Session " + session_id[:8],
-                                "agent_state": new_agent.state,
-                                "pending_approvals": pending,
-                                "session_allow_rules": rules,
-                                "subagent_panels": panels,
-                                "workers": workers,
-                            },
-                        },
-                        ensure_ascii=False,
-                    )
-                )
+            elif event == "session.delete":
+                sid = payload.get("session_id", session_id)
+                from app import persist as persist_mod
+
+                await manager.drop(sid)
+                await persist_mod.update_session_fields(sid, status="deleted")
+                await broadcast(session_id, "session.deleted", {"session_id": sid})
 
             elif event == "subagent.response":
                 subagent_id = payload.get("subagent_id", "")
@@ -266,6 +209,51 @@ async def ws_endpoint(ws: WebSocket):
         except asyncio.CancelledError:
             pass
         _detach_connection(ws, session_id)
+
+
+async def _send_hello(ws: WebSocket, session_id: str, agent):
+    pending = [
+        {"approval_id": p.approval_id, "tool": p.tool, "args": p.args, "reason": p.reason}
+        for p in gate.list_pending(session_id)
+    ]
+    session_rules = gate.get_session_rules(session_id)
+    try:
+        from app.agent.subagent import get_panels, get_workers
+
+        panels = get_panels(session_id)
+        workers = get_workers(session_id)
+    except Exception:
+        panels = []
+        workers = []
+    title = "Session " + session_id[:8]
+    model_id = None
+    try:
+        from app import persist as persist_mod
+
+        row = await persist_mod.get_session(session_id)
+        if row:
+            title = row.title
+            model_id = row.model_id
+    except Exception as e:
+        logger.debug("hello session lookup failed: %s", e)
+    await ws.send_text(
+        json.dumps(
+            {
+                "event": "session.hello",
+                "payload": {
+                    "session_id": session_id,
+                    "title": title,
+                    "model_id": model_id,
+                    "agent_state": agent.state,
+                    "pending_approvals": pending,
+                    "session_allow_rules": session_rules,
+                    "subagent_panels": panels,
+                    "workers": workers,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 async def _heartbeat(ws: WebSocket, pong_evt: asyncio.Event):

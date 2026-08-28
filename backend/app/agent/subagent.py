@@ -193,6 +193,12 @@ class SubAgentLoop:
         self.executor = Executor()
         self._build_initial_history()
 
+    async def bind_session_executor(self):
+        try:
+            self.executor = await Executor.from_session_id(self.session_id)
+        except Exception:
+            logger.debug("subagent executor bind failed", exc_info=True)
+
     def _build_initial_history(self):
         # 隔离快照：历史 + 行为描述 + 任务
         hist = list(self.snapshot)
@@ -213,6 +219,7 @@ class SubAgentLoop:
 
     async def run(self):
         logger.info("SubAgent run start: %s kind=%s session=%s", self.subagent_id, self.kind, self.session_id)
+        await self.bind_session_executor()
         # 通知前端 opened 已在 spawn 时广播，此处再补一次 worker.status
         if self.kind == "worker":
             await _broadcast(self.session_id, "worker.status", {"workers": get_workers(self.session_id)}, self.broadcaster)
@@ -357,6 +364,20 @@ class SubAgentLoop:
                 rec.late = True
         self.state = status if status in ("done", "error") else "done"
 
+        try:
+            from app import persist as persist_mod
+
+            await persist_mod.upsert_subagent_run(
+                main_session_id=self.session_id,
+                subagent_id=self.subagent_id,
+                kind=self.kind,
+                status=rec.status if rec else self.state,
+                result=result,
+                late=bool(rec.late) if rec else False,
+                finished=True,
+            )
+        except Exception:
+            logger.debug("persist subagent finish failed", exc_info=True)
         # 广播状态
         if self.kind == "interactive":
             await _broadcast(self.session_id, "subagent.done", {"subagent_id": self.subagent_id, "kind": self.kind, "result_summary": result[:500]}, self.broadcaster)
@@ -517,6 +538,21 @@ class SubAgentLoop:
                     result = str(result)
                     result = truncate_tool_result(result, settings.max_tool_result_tokens)
             await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": is_error, "subagent_id": self.subagent_id}, self.broadcaster)
+            try:
+                from app import persist as persist_mod
+
+                await persist_mod.save_tool_log(
+                    session_id=self.session_id,
+                    agent_id=self.subagent_id,
+                    name=name,
+                    args=args or {},
+                    result=result,
+                    tool_call_id=call_id,
+                    is_error=is_error,
+                    decision="config_allow",
+                )
+            except Exception:
+                logger.debug("persist worker tool_log failed", exc_info=True)
             return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
         except Exception as e:
             result = f"[异常] {name} 执行失败: {e}"
@@ -644,6 +680,19 @@ async def spawn_interactive(
     task = asyncio.create_task(loop.run())
     _tasks[subagent_id] = task
     await _broadcast(session_id, "subagent.opened", {"subagent_id": subagent_id, "kind": "interactive", "session_id": session_id, "task": task_desc}, broadcaster)
+    try:
+        from app import persist as persist_mod
+
+        await persist_mod.upsert_subagent_run(
+            main_session_id=session_id,
+            subagent_id=subagent_id,
+            kind="interactive",
+            behavior_desc=behavior_desc,
+            goal=goal,
+            status="running",
+        )
+    except Exception:
+        logger.debug("persist subagent_run failed", exc_info=True)
     logger.info("Spawn interactive: %s session=%s", subagent_id, session_id)
     return f"[已派生交互型子 agent] id={subagent_id} 任务: {task_desc} — 侧栏已打开，等待用户对话，完成后将自动回投主 agent。"
 
@@ -688,6 +737,19 @@ async def spawn_worker_batch(
         _tasks[subagent_id] = task_obj
         spawned.append(subagent_id)
         await _broadcast(session_id, "subagent.opened", {"subagent_id": subagent_id, "kind": "worker", "session_id": session_id, "task": t[:80]}, broadcaster)
+        try:
+            from app import persist as persist_mod
+
+            await persist_mod.upsert_subagent_run(
+                main_session_id=session_id,
+                subagent_id=subagent_id,
+                kind="worker",
+                behavior_desc=constraints or "",
+                goal=t,
+                status="running",
+            )
+        except Exception:
+            logger.debug("persist worker run failed", exc_info=True)
     await _broadcast(session_id, "worker.status", {"workers": get_workers(session_id)}, broadcaster)
     logger.info("Spawn workers batch=%s count=%d session=%s", batch_id, len(tasks), session_id)
     return f"[已派生后台工作型] batch_id={batch_id} workers={spawned} 任务: {tasks} — 后台并发执行中，完成将批量回投。"

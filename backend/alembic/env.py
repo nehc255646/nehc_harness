@@ -5,13 +5,15 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
+from app.core.config import settings
+from app.models import Base  # noqa: F401 — 注册 metadata
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 未来导入 models.Base
-target_metadata = None
+config.set_main_option("sqlalchemy.url", settings.mysql_dsn)
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
@@ -28,7 +30,11 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations():
-    connectable = async_engine_from_config(config.get_section(config.config_ini_section, {}), prefix="sqlalchemy.", poolclass=pool.NullPool)
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()

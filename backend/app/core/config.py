@@ -1,5 +1,7 @@
 """全量配置 — 对应 PLAN.md §10"""
 
+from urllib.parse import quote_plus
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,15 +47,16 @@ class Settings(BaseSettings):
     openai_model: str | None = None
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
     @property
     def mysql_dsn(self) -> str:
+        password = quote_plus(self.mysql_password or "")
         return (
-            f"mysql+aiomysql://{self.mysql_user}:{self.mysql_password}"
+            f"mysql+aiomysql://{self.mysql_user}:{password}"
             f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
         )
 

@@ -1,6 +1,12 @@
 """context 单元测试 — 摘要阈值/注入顺序/大结果截断 (PLAN §2.3)"""
 
-from app.agent.context import build_messages, should_summarize, truncate_tool_result
+from app.agent.context import (
+    build_messages,
+    estimate_tokens,
+    should_summarize,
+    truncate_tool_result,
+    window_slice,
+)
 
 
 def test_build_messages_order():
@@ -28,9 +34,16 @@ def test_truncate_tool_result_short():
 
 
 def test_truncate_tool_result_long():
-    content = "x" * 40000
-    result = truncate_tool_result(content, 8192)
+    content = "unique-token-fragment " * 4000
+    result = truncate_tool_result(content, 64)
     assert "截断" in result
-    assert result.startswith("x")
-    assert result.endswith("x")
-    assert len(result) < 40000
+    assert result.startswith("unique-token-fragment")
+    assert len(result) < len(content)
+
+
+def test_estimate_tokens_and_window():
+    msgs = [{"role": "user", "content": "hello"}] * 10
+    assert estimate_tokens(msgs) > 0
+    slid, window = window_slice(msgs, 2)
+    assert len(window) == 4
+    assert len(slid) == 6

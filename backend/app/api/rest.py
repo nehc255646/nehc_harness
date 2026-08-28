@@ -1,30 +1,555 @@
-"""REST API — 会话/历史/Provider·Model 配置占位"""
+"""REST API — 会话/历史/Provider·Model 配置/审批详情 (M3)"""
 
-from fastapi import APIRouter
+from __future__ import annotations
 
+import logging
+import uuid
+
+import httpx
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.core.crypto import decrypt_secret, encrypt_secret, encryption_ready
+from app.core.db import is_available, session_scope
+from app.models import AppConfig, ChatSession, Model, Provider, SubAgentRun, ToolLog, utcnow
+from app.permissions.gate import gate
+from app.persist import (
+    count_models,
+    ensure_session,
+    list_messages,
+    list_sessions,
+    list_tool_logs,
+    resolve_default_model_id,
+)
+from app.schemas import (
+    DefaultModelBody,
+    ModelCreate,
+    ModelOut,
+    ModelUpdate,
+    ProviderCreate,
+    ProviderOut,
+    ProviderTestBody,
+    ProviderUpdate,
+    SessionCreate,
+    SessionOut,
+    SessionUpdate,
+    ToolLogOut,
+)
+
+logger = logging.getLogger("harness.rest")
 router = APIRouter(prefix="/api", tags=["rest"])
+
+
+def _require_db() -> None:
+    if not is_available():
+        raise HTTPException(status_code=503, detail="MySQL 不可用")
+
+
+def _provider_out(p: Provider) -> ProviderOut:
+    return ProviderOut(
+        id=p.id,
+        provider_id=p.provider_id,
+        display_name=p.display_name,
+        base_url=p.base_url,
+        api_key_set=bool(p.api_key_encrypted),
+        created_at=p.created_at,
+    )
+
+
+def _model_out(m: Model) -> ModelOut:
+    slug = m.provider.provider_id if m.provider else None
+    name = m.provider.display_name if m.provider else None
+    return ModelOut(
+        id=m.id,
+        provider_id=m.provider_id,
+        provider_slug=slug,
+        provider_name=name,
+        model_id=m.model_id,
+        display_name=m.display_name,
+        context_window=m.context_window,
+        temperature=m.temperature,
+        created_at=m.created_at,
+    )
 
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "mysql": is_available()}
 
 
-@router.get("/sessions")
-async def list_sessions():
-    return {"sessions": [], "note": "M3 实现 — 当前占位"}
+# ---------- sessions ----------
 
 
-@router.get("/providers")
-async def list_providers():
-    return {"providers": [], "note": "M3 实现 — 当前占位"}
+@router.get("/sessions", response_model=list[SessionOut])
+async def api_list_sessions():
+    _require_db()
+    rows = await list_sessions()
+    return [SessionOut.model_validate(r) for r in rows]
+
+
+@router.post("/sessions", response_model=SessionOut)
+async def api_create_session(body: SessionCreate):
+    _require_db()
+    sid = str(uuid.uuid4())
+    model_id = body.model_id
+    if model_id is None:
+        model_id = await resolve_default_model_id()
+    row = await ensure_session(sid, title=body.title or "New Session", model_id=model_id, assign_default=False)
+    if row is None:
+        raise HTTPException(status_code=500, detail="创建会话失败")
+    from app.agent.manager import manager
+
+    await manager.get_or_create(sid)
+    return SessionOut.model_validate(row)
+
+
+@router.get("/sessions/{session_id}", response_model=SessionOut)
+async def api_get_session(session_id: str):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        row = await db.get(ChatSession, session_id)
+        if not row or row.status == "deleted":
+            raise HTTPException(status_code=404, detail="session not found")
+        return SessionOut.model_validate(row)
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionOut)
+async def api_patch_session(session_id: str, body: SessionUpdate):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        row = await db.get(ChatSession, session_id)
+        if not row or row.status == "deleted":
+            raise HTTPException(status_code=404, detail="session not found")
+        if body.title is not None:
+            row.title = body.title
+        if body.status is not None:
+            if body.status not in ("active", "archived", "deleted"):
+                raise HTTPException(status_code=400, detail="非法 status")
+            row.status = body.status
+        if "model_id" in body.model_dump(exclude_unset=True):
+            if body.model_id is not None:
+                model = await db.get(Model, body.model_id)
+                if not model:
+                    raise HTTPException(status_code=400, detail="模型不存在")
+            row.model_id = body.model_id
+        row.updated_at = utcnow()
+        await db.flush()
+        out = SessionOut.model_validate(row)
+    from app.agent.executor import Executor
+    from app.agent.manager import manager
+
+    agent = manager.get(session_id)
+    if agent is not None:
+        agent.executor = await Executor.from_session_id(session_id)
+    return out
+
+
+@router.delete("/sessions/{session_id}")
+async def api_delete_session(session_id: str):
+    _require_db()
+    from app.agent.manager import manager
+
+    await manager.drop(session_id)
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        row = await db.get(ChatSession, session_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="session not found")
+        row.status = "deleted"
+        row.updated_at = utcnow()
+    return {"ok": True}
+
+
+@router.get("/sessions/{session_id}/messages")
+async def api_session_messages(session_id: str):
+    _require_db()
+    rows = await list_messages(session_id)
+    return [
+        {
+            "id": r.id,
+            "public_id": r.public_id,
+            "session_id": r.session_id,
+            "agent_id": r.agent_id,
+            "role": r.role,
+            "content": r.content,
+            "tool_call_id": r.tool_call_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/sessions/{session_id}/tool-logs", response_model=list[ToolLogOut])
+async def api_session_tool_logs(session_id: str):
+    _require_db()
+    rows = await list_tool_logs(session_id)
+    return [ToolLogOut.model_validate(r) for r in rows]
+
+
+@router.get("/sessions/{session_id}/tool-logs/{tool_call_id}", response_model=ToolLogOut)
+async def api_tool_log_detail(session_id: str, tool_call_id: str):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        row = (
+            await db.scalars(
+                select(ToolLog)
+                .where(ToolLog.session_id == session_id, ToolLog.tool_call_id == tool_call_id)
+                .order_by(ToolLog.id.desc())
+            )
+        ).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="tool log not found")
+        return ToolLogOut.model_validate(row)
+
+
+@router.get("/sessions/{session_id}/approvals/{approval_id}")
+async def api_approval_detail(session_id: str, approval_id: str):
+    """审批详情：优先内存 pending，否则 404（完成后详情走 tool-logs）。"""
+    pending = gate.get(approval_id)
+    if pending and pending.session_id == session_id:
+        return {
+            "approval_id": pending.approval_id,
+            "session_id": pending.session_id,
+            "agent_id": pending.agent_id,
+            "tool": pending.tool,
+            "args": pending.args,
+            "reason": pending.reason,
+            "status": "pending",
+        }
+    raise HTTPException(status_code=404, detail="approval not found or already resolved")
+
+
+@router.get("/sessions/{session_id}/subagent-runs")
+async def api_subagent_runs(session_id: str):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        rows = list(
+            (
+                await db.scalars(
+                    select(SubAgentRun)
+                    .where(SubAgentRun.main_session_id == session_id)
+                    .order_by(SubAgentRun.id.asc())
+                )
+            ).all()
+        )
+        return [
+            {
+                "id": r.id,
+                "subagent_id": r.subagent_id,
+                "kind": r.kind,
+                "behavior_desc": r.behavior_desc,
+                "goal": r.goal,
+                "status": r.status,
+                "result": r.result,
+                "late": r.late,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            }
+            for r in rows
+        ]
+
+
+# ---------- providers / models ----------
+
+
+@router.get("/providers", response_model=list[ProviderOut])
+async def api_list_providers():
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        rows = list((await db.scalars(select(Provider).order_by(Provider.id.asc()))).all())
+        return [_provider_out(p) for p in rows]
+
+
+@router.post("/providers", response_model=ProviderOut)
+async def api_create_provider(body: ProviderCreate):
+    _require_db()
+    if not encryption_ready():
+        raise HTTPException(status_code=400, detail="ENCRYPTION_KEY 未配置或非法")
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        exists = (await db.scalars(select(Provider).where(Provider.provider_id == body.provider_id))).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="provider_id 已存在")
+        p = Provider(
+            provider_id=body.provider_id,
+            display_name=body.display_name,
+            base_url=body.base_url.rstrip("/"),
+            api_key_encrypted=encrypt_secret(body.api_key),
+        )
+        db.add(p)
+        await db.flush()
+        return _provider_out(p)
+
+
+@router.get("/providers/{provider_id}", response_model=ProviderOut)
+async def api_get_provider(provider_id: int):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        return _provider_out(p)
+
+
+@router.patch("/providers/{provider_id}", response_model=ProviderOut)
+async def api_patch_provider(provider_id: int, body: ProviderUpdate):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        if body.display_name is not None:
+            p.display_name = body.display_name
+        if body.base_url is not None:
+            p.base_url = body.base_url.rstrip("/")
+        if body.api_key is not None:
+            if not encryption_ready():
+                raise HTTPException(status_code=400, detail="ENCRYPTION_KEY 未配置或非法")
+            p.api_key_encrypted = encrypt_secret(body.api_key)
+        await db.flush()
+        return _provider_out(p)
+
+
+@router.delete("/providers/{provider_id}")
+async def api_delete_provider(provider_id: int):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        model_ids = list((await db.scalars(select(Model.id).where(Model.provider_id == provider_id))).all())
+        cfg = (await db.scalars(select(AppConfig).where(AppConfig.key == "default_model_id"))).first()
+        if cfg and cfg.value:
+            try:
+                if int(cfg.value) in set(model_ids):
+                    cfg.value = None
+            except ValueError:
+                pass
+        await db.delete(p)
+    return {"ok": True}
+
+
+@router.post("/providers/{provider_id}/test")
+async def api_test_provider(provider_id: int, body: ProviderTestBody | None = None):
+    """hello 探测。失败不阻止保存（调用方自行决定）。"""
+    _require_db()
+    body = body or ProviderTestBody()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        model_name = body.model_id
+        if not model_name:
+            m = (await db.scalars(select(Model).where(Model.provider_id == provider_id).limit(1))).first()
+            model_name = m.model_id if m else "gpt-4o-mini"
+        try:
+            api_key = decrypt_secret(p.api_key_encrypted)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        base = p.base_url.rstrip("/")
+    url = f"{base}/chat/completions" if not base.endswith("/chat/completions") else base
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 8,
+                    "temperature": 0,
+                },
+            )
+        if resp.status_code >= 400:
+            return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
+        data = resp.json()
+        text = ""
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except Exception:
+            text = str(data)[:200]
+        return {"ok": True, "model": model_name, "reply": text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/providers/{provider_id}/models", response_model=list[ModelOut])
+async def api_list_provider_models(provider_id: int):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        rows = list(
+            (
+                await db.scalars(
+                    select(Model).options(selectinload(Model.provider)).where(Model.provider_id == provider_id)
+                )
+            ).all()
+        )
+        return [_model_out(m) for m in rows]
+
+
+@router.post("/providers/{provider_id}/models", response_model=ModelOut)
+async def api_create_model(provider_id: int, body: ModelCreate):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        p = await db.get(Provider, provider_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="provider not found")
+        exists = (
+            await db.scalars(select(Model).where(Model.provider_id == provider_id, Model.model_id == body.model_id))
+        ).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="该供应商下 model_id 已存在")
+        m = Model(
+            provider_id=provider_id,
+            model_id=body.model_id,
+            display_name=body.display_name,
+            context_window=body.context_window,
+            temperature=body.temperature,
+        )
+        db.add(m)
+        await db.flush()
+        m.provider = p
+        return _model_out(m)
+
+
+@router.get("/models", response_model=list[ModelOut])
+async def api_list_models():
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        rows = list(
+            (await db.scalars(select(Model).options(selectinload(Model.provider)).order_by(Model.id.asc()))).all()
+        )
+        return [_model_out(m) for m in rows]
 
 
 @router.get("/models/resolved-default")
 async def resolved_default():
-    return {"model": None, "note": "M3 实现 — 上一次使用 > 兜底 > 空"}
+    _require_db()
+    mid = await resolve_default_model_id()
+    if mid is None:
+        return {"model": None, "reason": "上一次使用 > 兜底 > 空"}
+    async with session_scope() as db:
+        if db is None:
+            return {"model": None}
+        m = (
+            await db.scalars(select(Model).options(selectinload(Model.provider)).where(Model.id == mid))
+        ).first()
+        if not m:
+            return {"model": None}
+        return {"model": _model_out(m)}
+
+
+@router.patch("/models/{model_id}", response_model=ModelOut)
+async def api_patch_model(model_id: int, body: ModelUpdate):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        m = (await db.scalars(select(Model).options(selectinload(Model.provider)).where(Model.id == model_id))).first()
+        if not m:
+            raise HTTPException(status_code=404, detail="model not found")
+        if body.display_name is not None:
+            m.display_name = body.display_name
+        if body.context_window is not None:
+            m.context_window = body.context_window
+        if body.temperature is not None:
+            m.temperature = body.temperature
+        await db.flush()
+        return _model_out(m)
+
+
+@router.delete("/models/{model_id}")
+async def api_delete_model(model_id: int):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        m = await db.get(Model, model_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="model not found")
+        cfg = (await db.scalars(select(AppConfig).where(AppConfig.key == "default_model_id"))).first()
+        if cfg and cfg.value:
+            try:
+                if int(cfg.value) == model_id:
+                    cfg.value = None
+            except ValueError:
+                pass
+        await db.delete(m)
+    return {"ok": True}
 
 
 @router.get("/config/default-model")
 async def get_default_model():
-    return {"default_model_id": None}
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        cfg = (await db.scalars(select(AppConfig).where(AppConfig.key == "default_model_id"))).first()
+        mid = None
+        if cfg and cfg.value:
+            try:
+                mid = int(cfg.value)
+            except ValueError:
+                mid = None
+        return {"default_model_id": mid}
+
+
+@router.put("/config/default-model")
+async def put_default_model(body: DefaultModelBody):
+    _require_db()
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        if body.default_model_id is not None:
+            m = await db.get(Model, body.default_model_id)
+            if not m:
+                raise HTTPException(status_code=400, detail="模型不存在")
+        cfg = (await db.scalars(select(AppConfig).where(AppConfig.key == "default_model_id"))).first()
+        value = str(body.default_model_id) if body.default_model_id is not None else None
+        if cfg is None:
+            cfg = AppConfig(key="default_model_id", value=value)
+            db.add(cfg)
+        else:
+            cfg.value = value
+            cfg.updated_at = utcnow()
+        return {"default_model_id": body.default_model_id}
+
+
+@router.get("/status")
+async def api_status():
+    n_models = 0
+    try:
+        n_models = await count_models()
+    except Exception as e:
+        logger.debug("count_models failed: %s", e)
+    return {"mysql": is_available(), "models": n_models, "encryption": encryption_ready()}

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { historyToChat, rest, type ModelRow, type SessionRow } from "../api/rest";
 import { wsClient } from "../api/ws";
 
 type Message = { id: string; role: string; content: string; streaming?: boolean };
@@ -25,7 +26,11 @@ type State = {
   connectionState: "connecting" | "connected" | "disconnected" | "error";
   agentState: AgentState;
   sessionId: string;
-  sessions: string[];
+  sessionTitle: string;
+  modelId: number | null;
+  sessionRows: SessionRow[];
+  models: ModelRow[];
+  sendBlockedReason: string;
   subPanels: SubPanel[];
   dismissedPanels: string[];
   workers: WorkerItem[];
@@ -35,10 +40,16 @@ type State = {
   dismissPanel: (subagent_id: string) => void;
   stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
+  boot: () => Promise<void>;
+  refreshSessions: () => Promise<void>;
+  refreshModels: () => Promise<void>;
+  setSessionModel: (modelId: number | null) => Promise<void>;
+  deleteSession: (id: string) => Promise<void>;
 };
 
 // 事件 handler 只注册一次（StrictMode/重复 connect 下不重复绑定）
 let handlersBound = false;
+let bootStarted = false;
 
 // 子 agent 流式消息归属：message_id -> subagent_id
 const subMessageOwner = new Map<string, string>();
@@ -63,16 +74,17 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     wsClient.setSession(sid2);
     set((s) => {
       const incomingPanels = Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels;
-      // 重连对账：保留本地已有面板的对话记录
       const merged = incomingPanels.map((np) => {
         const old = s.subPanels.find((x) => x.subagent_id === np.subagent_id);
         return { ...np, messages: old?.messages || [] };
       });
+      const switched = sid2 !== s.sessionId;
       return {
         sessionId: sid2,
-        sessions: s.sessions.includes(sid2) ? s.sessions : [...s.sessions, sid2],
-        messages: sid2 === s.sessionId ? s.messages : [],
-        toolCalls: sid2 === s.sessionId ? s.toolCalls : [],
+        sessionTitle: (p.title as string) || s.sessionTitle,
+        modelId: (p.model_id as number | null) ?? null,
+        messages: switched ? [] : s.messages,
+        toolCalls: switched ? [] : s.toolCalls,
         pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
         subPanels: merged,
@@ -80,6 +92,21 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         agentState: (p.agent_state as AgentState) || s.agentState,
       };
     });
+    // 从 REST 拉历史（重启后续聊）
+    rest
+      .messages(sid2)
+      .then((rows) => {
+        set((s) => (s.sessionId === sid2 ? { messages: historyToChat(rows) } : {}));
+      })
+      .catch(() => {
+        /* mysql 降级时忽略 */
+      });
+    rest
+      .sessions()
+      .then((rows) => set({ sessionRows: rows }))
+      .catch(() => {
+        /* ignore */
+      });
   });
 
   wsClient.on("session.update", (p) => {
@@ -208,8 +235,12 @@ export const useAgentStore = create<State>((set, get) => ({
   sessionAllowRules: [],
   connectionState: "connecting",
   agentState: "idle",
-  sessionId: "default",
-  sessions: ["default"],
+  sessionId: "",
+  sessionTitle: "",
+  modelId: null,
+  sessionRows: [],
+  models: [],
+  sendBlockedReason: "",
   subPanels: [],
   dismissedPanels: [],
   workers: [],
@@ -221,10 +252,76 @@ export const useAgentStore = create<State>((set, get) => ({
     wsClient.connect(sid);
   },
 
-  sendMessage: (content) => {
+  boot: async () => {
+    if (bootStarted) return;
+    bootStarted = true;
+    bindHandlers(set, get);
+    try {
+      const [rows, models] = await Promise.all([rest.sessions(), rest.models().catch(() => [] as ModelRow[])]);
+      set({ sessionRows: rows, models });
+      let sid = rows[0]?.id;
+      if (!sid) {
+        const created = await rest.createSession("New Session");
+        sid = created.id;
+        set({ sessionRows: [created] });
+      }
+      set({ sessionId: sid, connectionState: "connecting" });
+      wsClient.connect(sid);
+    } catch {
+      // MySQL 不可用：仍连 WS，走内存会话
+      const sid = get().sessionId || "default";
+      set({ sessionId: sid, connectionState: "connecting" });
+      wsClient.connect(sid);
+    }
+  },
+
+  refreshSessions: async () => {
+    try {
+      set({ sessionRows: await rest.sessions() });
+    } catch {
+      /* ignore */
+    }
+  },
+
+  refreshModels: async () => {
+    try {
+      set({ models: await rest.models() });
+    } catch {
+      set({ models: [] });
+    }
+  },
+
+  setSessionModel: async (modelId) => {
     const sid = get().sessionId;
+    if (!sid) return;
+    const row = await rest.patchSession(sid, { model_id: modelId });
+    set({ modelId: row.model_id, sendBlockedReason: "" });
+    await get().refreshSessions();
+  },
+
+  deleteSession: async (id) => {
+    await rest.deleteSession(id);
+    const rows = await rest.sessions();
+    set({ sessionRows: rows });
+    if (get().sessionId === id) {
+      const next = rows[0];
+      if (next) {
+        wsClient.send("session.select", { session_id: next.id });
+      } else {
+        const created = await rest.createSession("New Session");
+        wsClient.send("session.select", { session_id: created.id });
+      }
+    }
+  },
+
+  sendMessage: (content) => {
+    const { sessionId: sid, models, modelId } = get();
+    if (models.length > 0 && !modelId) {
+      set({ sendBlockedReason: "请先选择模型后再发送" });
+      return;
+    }
+    set({ sendBlockedReason: "" });
     const localId = `local-${Date.now()}`;
-    // 仅在开启新 run 时清空上一轮工具卡，运行中追加消息不抹卡片
     const fresh = get().agentState === "idle" || get().agentState === "done" || get().agentState === "error";
     set((s) => ({ messages: [...s.messages, { id: localId, role: "user", content }], toolCalls: fresh ? [] : s.toolCalls }));
     wsClient.send("message.send", { session_id: sid, content });
