@@ -1,5 +1,6 @@
 """上下文管理 — 消息构造 + 流式 tool_calls 累积解析 + 大结果截断 + 摘要触发"""
 
+import hashlib
 import json
 import logging
 import uuid
@@ -58,6 +59,38 @@ def window_slice(history: list[dict], window_n: int) -> tuple[list[dict], list[d
     while start > 0 and history[start].get("role") == "tool":
         start -= 1
     return history[:start], history[start:]
+
+
+def slid_fingerprint(slid: list[dict]) -> str:
+    """滑出消息指纹，用于摘要缓存去重。"""
+    raw = json.dumps(slid, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def next_summary_cache(
+    prev: dict | None,
+    text: str | None,
+    slid_count: int,
+    fingerprint: str,
+    pending_slid: list | None = None,
+) -> dict:
+    """摘要缓存下一版：成功则升版本并清空 pending；失败则把滑出消息留在 pending_slid。"""
+    prev = prev or {}
+    if text:
+        return {
+            "text": text,
+            "version": int(prev.get("version") or 0) + 1,
+            "covered_count": int(prev.get("covered_count") or 0) + slid_count,
+            "last_slid_hash": fingerprint,
+            "pending_slid": [],
+        }
+    return {
+        "text": prev.get("text"),
+        "version": int(prev.get("version") or 0),
+        "covered_count": int(prev.get("covered_count") or 0),
+        "last_slid_hash": prev.get("last_slid_hash"),
+        "pending_slid": list(pending_slid or []),
+    }
 
 
 # ---------- 流式 tool_calls 累积解析（主 agent 与子 agent 共用） ----------

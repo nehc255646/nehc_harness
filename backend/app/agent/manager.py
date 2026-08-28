@@ -63,6 +63,12 @@ class AgentManager:
             gate.clear_session_rules(session_id)
         except Exception:
             logger.exception("clear session rules failed: %s", session_id)
+        try:
+            from app.core import rtstore
+
+            await rtstore.purge_session(session_id)
+        except Exception:
+            logger.exception("purge redis session failed: %s", session_id)
 
     def all_ids(self) -> list[str]:
         return list(self._agents.keys())

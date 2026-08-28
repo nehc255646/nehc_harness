@@ -29,7 +29,7 @@ export default function SubAgentPanel() {
       {visible.map((p) => (
         <div key={p.subagent_id} className="rounded border border-zinc-800 bg-zinc-900 p-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono text-cyan-400">
+            <span className="text-xs font-mono text-accent">
               {p.subagent_id}
               {p.late && <span className="ml-1 rounded bg-yellow-900/60 px-1 text-yellow-300">迟到</span>}
             </span>
@@ -49,10 +49,10 @@ export default function SubAgentPanel() {
           {(p.messages?.length || 0) > 0 && (
             <div className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded bg-zinc-950 p-1">
               {p.messages.map((m) => (
-                <div key={m.id} className={`rounded px-1.5 py-0.5 text-xs ${m.role === "user" ? "bg-zinc-800 text-zinc-200" : "bg-zinc-900 text-cyan-200"}`}>
+                <div key={m.id} className={`rounded px-1.5 py-0.5 text-xs ${m.role === "user" ? "bg-zinc-800 text-zinc-200" : "bg-zinc-900 text-accent"}`}>
                   <span className="mr-1 text-[10px] text-zinc-500">{m.role === "user" ? "我" : "子"}</span>
                   <span className="whitespace-pre-wrap">{m.content}</span>
-                  {m.streaming && <span className="ml-0.5 animate-pulse text-cyan-400">▍</span>}
+                  {m.streaming && <span className="ml-0.5 animate-pulse text-accent">▍</span>}
                 </div>
               ))}
               <div ref={bottomRef} />
@@ -70,7 +70,7 @@ export default function SubAgentPanel() {
                   }
                 }}
                 placeholder="侧栏输入..."
-                className="flex-1 rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs outline-none focus:border-cyan-500"
+                className="flex-1 rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs outline-none focus:border-accent"
               />
               <button
                 onClick={() => {
@@ -78,7 +78,7 @@ export default function SubAgentPanel() {
                   sendSubagentMessage(p.subagent_id, inputs[p.subagent_id].trim());
                   setInputs((s) => ({ ...s, [p.subagent_id]: "" }));
                 }}
-                className="rounded bg-cyan-500 px-2 py-1 text-xs text-black"
+                className="rounded bg-accent px-2 py-1 text-xs text-accent-fg"
               >
                 发送
               </button>

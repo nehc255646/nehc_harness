@@ -2,7 +2,7 @@
 
 import uuid
 
-from app.tools.files import glob, grep, read, write
+from app.tools.files import apply_edit, apply_write, edit, glob, grep, read, write
 
 _UNIQUE = f"test_{uuid.uuid4().hex[:8]}"
 
@@ -26,6 +26,28 @@ def test_path_escape_rejected():
     assert "越权" in write.invoke({"path": "../escape.txt", "content": "x"})
     assert "越权" in glob.invoke({"pattern": "../**/*"})
     assert "越权" in grep.invoke({"pattern": "root", "path": "../etc/passwd"})
+
+
+def test_apply_write_includes_old_new_diff():
+    path = f"{_UNIQUE}_diff.txt"
+    msg1, extra1 = apply_write(path, "alpha")
+    assert "已写入" in msg1
+    assert extra1 and extra1["diff"]["old_text"] == ""
+    assert extra1["diff"]["new_text"] == "alpha"
+    _msg2, extra2 = apply_write(path, "beta")
+    assert extra2 and extra2["diff"]["old_text"] == "alpha"
+    assert extra2["diff"]["new_text"] == "beta"
+
+
+def test_edit_unique_and_ambiguous():
+    path = f"{_UNIQUE}_edit.txt"
+    write.invoke({"path": path, "content": "foo bar foo"})
+    bad = edit.invoke({"path": path, "old_string": "foo", "new_string": "baz"})
+    assert "多处" in bad
+    ok, extra = apply_edit(path, "foo bar foo", "baz")
+    assert "已编辑" in ok
+    assert extra and "baz" in extra["diff"]["new_text"]
+    assert read.invoke({"path": path}) == "baz"
 
 
 def test_glob_embedded_traversal_filtered():

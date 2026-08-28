@@ -16,7 +16,7 @@ export default function WorkerStatus() {
     <div className="border-t border-zinc-800 bg-zinc-950 px-3 py-2">
       <div className="flex items-center gap-2 mb-1">
         <span className="text-xs font-semibold text-zinc-400">工作区</span>
-        <span className="h-2 w-2 rounded-full bg-cyan-400 shadow shadow-cyan-400/50" />
+        <span className="h-2 w-2 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent-glow)]" />
         <span className="text-xs text-zinc-500">{workers.length} 个后台任务</span>
       </div>
       <div className="flex flex-wrap gap-2">

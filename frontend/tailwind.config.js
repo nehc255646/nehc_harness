@@ -5,7 +5,13 @@ export default {
   theme: {
     extend: {
       colors: {
-        accent: "var(--color-accent)",
+        accent: {
+          DEFAULT: "var(--color-accent)",
+          hover: "var(--color-accent-hover)",
+          fg: "var(--color-accent-fg)",
+          dim: "var(--color-accent-dim)",
+          glow: "var(--color-accent-glow)",
+        },
         bg: "var(--color-bg)",
       },
     },

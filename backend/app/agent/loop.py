@@ -11,13 +11,16 @@ from app.agent.context import (
     accumulate_tool_calls,
     build_messages,
     estimate_tokens,
+    next_summary_cache,
     parse_tool_calls,
     should_summarize,
+    slid_fingerprint,
     truncate_tool_result,
     window_slice,
 )
 from app.agent.executor import Executor
 from app.agent.prompts import SYSTEM_PROMPT
+from app.core import rtstore
 from app.core.config import settings
 from app.core.errors import ErrorCode
 from app.permissions.gate import gate
@@ -41,6 +44,8 @@ class AgentLoop:
         self.state: str = "idle"
         self.history: list[dict] = []  # {role, content, tool_calls?, tool_call_id?}
         self.summary: str | None = None
+        self.summary_version: int = 0
+        self.summary_covered: int = 0
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._round = 0
@@ -74,6 +79,23 @@ class AgentLoop:
             logger.info("Hydrated %d messages for session=%s", len(window), self.session_id)
         if summary:
             self.summary = summary
+        try:
+            cache = await rtstore.get_summary_cache(self.session_id)
+        except Exception:
+            cache = None
+        if cache:
+            self.summary_version = int(cache.get("version") or 0)
+            self.summary_covered = int(cache.get("covered_count") or 0)
+            if not self.summary and cache.get("text"):
+                self.summary = str(cache["text"])
+        elif self.summary:
+            try:
+                await rtstore.set_summary_cache(
+                    self.session_id,
+                    next_summary_cache(None, self.summary, 0, ""),
+                )
+            except Exception:
+                logger.debug("warm summary cache failed", exc_info=True)
         # PLAN §2.4 时序兜底：主 agent done 期间完成的迟到结果，续聊时喂回
         try:
             late_runs = await persist_mod.load_late_subagent_results(self.session_id)
@@ -94,6 +116,7 @@ class AgentLoop:
             self._round = 0
             self.state = "idle"
             self._turn_spawned = 0
+            rtstore.fire_and_forget(rtstore.set_agent_state(self.session_id, self.agent_id, "idle"))
             self._task = asyncio.create_task(self.run())
             logger.info("AgentLoop task started: session=%s", self.session_id)
 
@@ -114,8 +137,7 @@ class AgentLoop:
             kill_shell_group(self._shell_group())
         except Exception as e:
             logger.debug("Kill shell group failed: %s", e)
-        self.state = "done"
-        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
+        await self._set_state("done")
         if self._task:
             self._task.cancel()
             try:
@@ -128,6 +150,14 @@ class AgentLoop:
         return f"{self.session_id}:{self.agent_id}"
 
     # ---------- 广播 ----------
+
+    async def _set_state(self, state: str) -> None:
+        self.state = state
+        try:
+            await rtstore.set_agent_state(self.session_id, self.agent_id, state)
+        except Exception:
+            logger.debug("rtstore set_agent_state failed", exc_info=True)
+        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": state})
 
     async def _broadcast(self, event: str, payload: dict):
         if self.broadcaster:
@@ -149,8 +179,7 @@ class AgentLoop:
     async def run(self):
         logger.info("AgentLoop run started: session=%s", self.session_id)
         # 队列空则 idle：hydrate 重建的历史不是进行中的一轮，须等新的用户/回投事件
-        self.state = "idle" if self.queue.empty() else "running"
-        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": self.state})
+        await self._set_state("idle" if self.queue.empty() else "running")
 
         try:
             while not self._stop_event.is_set():
@@ -190,8 +219,7 @@ class AgentLoop:
                 # 3. 调模型 (流式)
                 self._round += 1
                 if self._round > settings.max_rounds:
-                    self.state = "done"
-                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
+                    await self._set_state("done")
                     await self._emit_message("已达到最大轮数，任务结束。", done=True)
                     break
 
@@ -200,13 +228,11 @@ class AgentLoop:
                         "error",
                         {"code": ErrorCode.MODEL_ERROR, "message": "会话模型无法解析或解密"},
                     )
-                    self.state = "error"
-                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+                    await self._set_state("error")
                     try:
                         event = await self.queue.get()
                         await self._handle_incoming(event)
-                        self.state = "running"
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                        await self._set_state("running")
                     except asyncio.CancelledError:
                         break
                     continue
@@ -218,13 +244,11 @@ class AgentLoop:
                     # 已选模型解析失败不走演示；其余模型错误才 heuristic
                     if getattr(self.executor, "unresolved", False):
                         await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
-                        self.state = "error"
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+                        await self._set_state("error")
                         try:
                             event = await self.queue.get()
                             await self._handle_incoming(event)
-                            self.state = "running"
-                            await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                            await self._set_state("running")
                         except asyncio.CancelledError:
                             break
                         continue
@@ -234,14 +258,12 @@ class AgentLoop:
                         logger.info("Fallback to heuristic after model error")
                     except Exception:
                         await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
-                        self.state = "error"
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+                        await self._set_state("error")
                         # 等待新消息唤醒，避免空转
                         try:
                             event = await self.queue.get()
                             await self._handle_incoming(event)
-                            self.state = "running"
-                            await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                            await self._set_state("running")
                         except asyncio.CancelledError:
                             break
                         continue
@@ -263,8 +285,7 @@ class AgentLoop:
                     else:
                         await self._emit_message(text, done=True)
                     # 进入 idle，等待下一事件
-                    self.state = "idle"
-                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "idle"})
+                    await self._set_state("idle")
                     continue
 
                 # 5. tool_calls 分支：文本只随 assistant_msg 入 history，避免重复记录
@@ -308,8 +329,7 @@ class AgentLoop:
                 # 大结果截断已在 dispatch 内处理
 
                 if has_finish:
-                    self.state = "done"
-                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "done"})
+                    await self._set_state("done")
                     break
                 # 否则继续下一轮 (goto 2)，不进入 idle
                 continue
@@ -318,8 +338,7 @@ class AgentLoop:
             logger.info("AgentLoop cancelled: %s", self.session_id)
         except Exception as e:
             logger.exception("AgentLoop crashed")
-            self.state = "error"
-            await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "error"})
+            await self._set_state("error")
             await self._broadcast("error", {"code": ErrorCode.INTERNAL, "message": str(e)})
 
     async def _handle_incoming(self, event: dict):
@@ -328,12 +347,17 @@ class AgentLoop:
             content = event.get("content", "")
             self.history.append({"role": "user", "content": content})
             await self._persist_message("user", content)
+            try:
+                new_title = await persist_mod.maybe_autotitle(self.session_id, content)
+                if new_title:
+                    await self._broadcast("session.update", {"title": new_title, "session_id": self.session_id})
+            except Exception:
+                logger.debug("autotitle failed", exc_info=True)
             # PLAN §2.4：派生上限按唤醒周期（turn）计
             self._turn_spawned = 0
             # 保证 running
             if self.state in ("idle", "done", "error"):
-                self.state = "running"
-                await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                await self._set_state("running")
         elif etype == "subagent_result":
             # M2 交互型异步回投
             result = event.get("result", "")
@@ -343,8 +367,7 @@ class AgentLoop:
             await self._persist_message("user", content)
             self._turn_spawned = 0
             if self.state in ("idle", "done", "error"):
-                self.state = "running"
-                await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                await self._set_state("running")
         elif etype == "worker_batch_done":
             # M2 工作型批量聚合回投
             payload = event.get("payload") or {}
@@ -359,8 +382,7 @@ class AgentLoop:
             self._turn_spawned = 0
             # 聚合事件也广播，供前端 worker.batch_done 已由子 agent 广播，此处仅注入上下文
             if self.state in ("idle", "done", "error"):
-                self.state = "running"
-                await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                await self._set_state("running")
         elif etype == "stop":
             await self.stop()
 
@@ -396,7 +418,7 @@ class AgentLoop:
         self,
         name: str,
         args: dict,
-        result: str,
+        result: str | dict,
         call_id: str,
         is_error: bool,
         duration_ms: int | None,
@@ -421,7 +443,7 @@ class AgentLoop:
             logger.debug("persist tool_log failed", exc_info=True)
 
     async def _maybe_compact(self):
-        """token 超阈值：旧摘要 + 滑出消息合并；失败则丢窗口外并告警。"""
+        """token 超阈值：旧摘要 + 滑出消息增量合并；失败则把滑出消息缓存在 Redis 待下次合并。"""
         tokens = estimate_tokens(self.history, self.summary)
         ctx = getattr(self.executor, "context_window", None) or 128000
         if not should_summarize(tokens, ctx, settings.summary_token_ratio):
@@ -429,16 +451,36 @@ class AgentLoop:
         slid, window = window_slice(self.history, settings.window_n)
         if not slid:
             return
-        new_sum = await self._merge_summary(slid)
+        try:
+            cache = await rtstore.get_summary_cache(self.session_id)
+        except Exception:
+            cache = None
+        pending_slid = list((cache or {}).get("pending_slid") or [])
+        to_merge = pending_slid + slid
+        fp = slid_fingerprint(to_merge)
+        if cache and cache.get("last_slid_hash") == fp and cache.get("text") and not pending_slid:
+            self.summary = str(cache["text"])
+            self.summary_version = int(cache.get("version") or 0)
+            self.summary_covered = int(cache.get("covered_count") or 0)
+            self.history = window
+            return
+        new_sum = await self._merge_summary(to_merge)
+        payload = next_summary_cache(cache, new_sum, len(to_merge), fp, pending_slid=None if new_sum else to_merge)
         if new_sum:
             self.summary = new_sum
+            self.summary_version = int(payload["version"])
+            self.summary_covered = int(payload["covered_count"])
         else:
-            logger.warning("摘要失败，丢弃窗口外 %d 条 session=%s", len(slid), self.session_id)
+            logger.warning("摘要失败，窗口外 %d 条进入待合并缓存 session=%s", len(to_merge), self.session_id)
         self.history = window
         try:
             await persist_mod.save_summary(self.session_id, self.summary)
         except Exception:
             logger.debug("save_summary failed", exc_info=True)
+        try:
+            await rtstore.set_summary_cache(self.session_id, payload)
+        except Exception:
+            logger.debug("set_summary_cache failed", exc_info=True)
 
     async def _merge_summary(self, slid: list[dict]) -> str | None:
         if self.executor._llm is None:
@@ -665,8 +707,7 @@ class AgentLoop:
                 await self._broadcast("approval.request", {"approval_id": approval_id, "tool": name, "args": args, "reason": reason})
                 # 展示态：进入等待审批（PLAN §2.5）
                 if self.state != "awaiting_approval":
-                    self.state = "awaiting_approval"
-                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "awaiting_approval"})
+                    await self._set_state("awaiting_approval")
                 # 等待审批 (带超时)
                 try:
                     approved, decision_val, resolve_reason = await asyncio.wait_for(future, timeout=settings.approval_timeout)
@@ -682,8 +723,7 @@ class AgentLoop:
                     # stop 取消路径不回运行态，避免覆盖 done
                     still_pending = any(p.agent_id == self.agent_id for p in gate.list_pending(self.session_id))
                     if not self._stop_event.is_set() and self.state == "awaiting_approval" and not still_pending:
-                        self.state = "running"
-                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
+                        await self._set_state("running")
 
                 # 已 resolve
                 await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": approved, "reason": resolve_reason})
@@ -782,6 +822,7 @@ class AgentLoop:
         await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
         start = time.time()
         is_error = False
+        diff = None
         try:
             if name == "shell":
                 command = args.get("command") or args.get("cmd") or ""
@@ -793,32 +834,57 @@ class AgentLoop:
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_error})
                     await self._persist_tool_log(name, args, result, call_id, is_error, duration_ms, decision, reason)
                     return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
-                # 异步执行 (进程组按 session:agent 分组，供 stop 定向回收)
+
                 from app.tools.shell import shell_async
 
-                output, code = await shell_async(command, group=self._shell_group())
+                async def _on_progress(tail: str):
+                    await self._broadcast("tool.progress", {"call_id": call_id, "tail": tail})
+
+                output, code = await shell_async(command, group=self._shell_group(), on_progress=_on_progress)
                 result = output
                 is_error = code != 0 and code != 124  # 124 为超时
+            elif name == "write":
+                from app.tools.files import apply_write
+
+                result, extra = apply_write(str(args.get("path") or ""), str(args.get("content") or ""))
+                diff = (extra or {}).get("diff")
+                is_error = str(result).startswith("[错误]")
+            elif name == "edit":
+                from app.tools.files import apply_edit
+
+                result, extra = apply_edit(
+                    str(args.get("path") or ""),
+                    str(args.get("old_string") or ""),
+                    str(args.get("new_string") or ""),
+                )
+                diff = (extra or {}).get("diff")
+                is_error = str(result).startswith("[错误]")
             else:
                 tool_obj = TOOL_MAP.get(name)
                 if not tool_obj:
                     result = f"[错误] 未知工具: {name}"
                     is_error = True
                 else:
-                    # LangChain tool 的 ainvoke
                     try:
                         result = await tool_obj.ainvoke(args)  # type: ignore
                     except Exception:
                         result = tool_obj.invoke(args)  # type: ignore
                     result = str(result)
-                    # 大结果截断注入上下文，完整落 ToolLog (M3)
-                    result = truncate_tool_result(result, settings.max_tool_result_tokens)
+                    is_error = str(result).startswith("[错误]")
 
+            full_text = str(result)
+            injected = truncate_tool_result(full_text, settings.max_tool_result_tokens)
             duration_ms = int((time.time() - start) * 1000)
-            await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": is_error})
-            await self._persist_tool_log(name, args, result, call_id, is_error, duration_ms, decision, reason)
+            stored: dict = {"text": full_text}
+            if diff:
+                stored["diff"] = diff
+            payload = {"call_id": call_id, "result": injected, "is_error": is_error}
+            if diff:
+                payload["diff"] = diff
+            await self._broadcast("tool.result", payload)
+            await self._persist_tool_log(name, args, stored, call_id, is_error, duration_ms, decision, reason)
             logger.info("Tool done: %s -> %s (%dms) decision=%s", name, "error" if is_error else "ok", duration_ms, decision)
-            return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
+            return {"call_id": call_id, "name": name, "result": injected, "is_error": is_error}
         except Exception as e:
             duration_ms = int((time.time() - start) * 1000)
             result = f"[异常] {name} 执行失败: {e}"

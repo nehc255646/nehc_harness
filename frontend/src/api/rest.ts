@@ -44,6 +44,8 @@ export type HistoryMessage = {
   tool_call_id?: string | null;
 };
 
+export type FileDiffPayload = { path?: string; old_text: string; new_text: string };
+
 export type ToolLogRow = {
   id: number;
   session_id: string;
@@ -57,6 +59,22 @@ export type ToolLogRow = {
   duration_ms: number | null;
   decision: string;
 };
+
+export function extractDiff(name: string, args: unknown, result: unknown): FileDiffPayload | undefined {
+  if (result && typeof result === "object" && result !== null && "diff" in result) {
+    const d = (result as { diff?: FileDiffPayload }).diff;
+    if (d && typeof d.old_text === "string" && typeof d.new_text === "string") return d;
+  }
+  if (!args || typeof args !== "object") return undefined;
+  const a = args as Record<string, unknown>;
+  if (name === "edit" && typeof a.old_string === "string" && typeof a.new_string === "string") {
+    return { path: String(a.path || ""), old_text: a.old_string, new_text: a.new_string };
+  }
+  if (name === "write" && typeof a.content === "string") {
+    return { path: String(a.path || ""), old_text: "", new_text: a.content };
+  }
+  return undefined;
+}
 
 export const rest = {
   sessions: () => fetch("/api/sessions").then(json) as Promise<SessionRow[]>,
@@ -128,7 +146,8 @@ export function mergeChatMessages(
     return {
       id: m.id,
       role: cur.role || m.role,
-      content: cur.streaming ? cur.content : cur.content || m.content,
+      // 进行中半条保留 live；已完成以 REST 历史为准（断线期间可能已 message.done）
+      content: cur.streaming ? cur.content || m.content : m.content || cur.content,
       streaming: cur.streaming,
     };
   });

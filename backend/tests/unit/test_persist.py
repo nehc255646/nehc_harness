@@ -9,8 +9,10 @@ from app.core.db import init_db
 from app.persist import (
     ensure_session,
     flush_pending,
+    get_session,
     get_tool_log,
     load_history,
+    maybe_autotitle,
     pending_count,
     save_message,
     save_tool_log,
@@ -76,6 +78,40 @@ async def test_tool_log_and_assistant_tool_calls(db_ready):
     assert log is not None
     assert log.message_id is not None
     assert log.decision == "approved_once"
+
+
+async def test_maybe_autotitle_only_placeholder(db_ready):
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="New Session")
+    t = await maybe_autotitle(sid, "执行 echo hello world")
+    assert t == "执行 echo hello world"
+    row = await get_session(sid)
+    assert row and row.title == "执行 echo hello world"
+    t2 = await maybe_autotitle(sid, "第二句不应覆盖")
+    assert t2 is None
+    row2 = await get_session(sid)
+    assert row2 and row2.title == "执行 echo hello world"
+
+
+async def test_tool_log_keeps_full_text_and_diff(db_ready):
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="diff-log")
+    blob = "X" * 2000
+    await save_tool_log(
+        session_id=sid,
+        agent_id="main",
+        name="write",
+        args={"path": "a.txt", "content": blob},
+        result={"text": blob, "diff": {"path": "a.txt", "old_text": "", "new_text": blob}},
+        tool_call_id="c_diff",
+        is_error=False,
+        decision="approved_once",
+    )
+    log = await get_tool_log(sid, "c_diff")
+    assert log is not None
+    assert isinstance(log.result, dict)
+    assert log.result["text"] == blob
+    assert log.result["diff"]["new_text"] == blob
 
 
 async def test_flush_pending_increments_retries(monkeypatch):

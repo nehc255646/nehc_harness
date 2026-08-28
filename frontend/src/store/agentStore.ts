@@ -1,9 +1,25 @@
 import { create } from "zustand";
-import { historyToChat, mergeChatMessages, rest, type ModelRow, type SessionRow, type ToolLogRow } from "../api/rest";
+import {
+  extractDiff,
+  historyToChat,
+  mergeChatMessages,
+  rest,
+  type FileDiffPayload,
+  type ModelRow,
+  type SessionRow,
+  type ToolLogRow,
+} from "../api/rest";
 import { wsClient } from "../api/ws";
 
 type Message = { id: string; role: string; content: string; streaming?: boolean };
-type ToolCall = { call_id: string; name: string; args: unknown; result?: unknown };
+type ToolCall = {
+  call_id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  diff?: FileDiffPayload;
+  progress?: string;
+};
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
 type SubPanelMessage = { id: string; role: string; content: string; streaming?: boolean };
 type SubPanel = {
@@ -45,6 +61,8 @@ type State = {
   refreshModels: () => Promise<void>;
   setSessionModel: (modelId: number | null) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
+  renameSession: (id: string, title: string) => Promise<void>;
+  stopAgent: () => void;
 };
 
 // 事件 handler 只注册一次（StrictMode/重复 connect 下不重复绑定）
@@ -79,11 +97,14 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         return { ...np, messages: old?.messages || [] };
       });
       const switched = sid2 !== s.sessionId;
+      const live = p.agent_state === "running" || p.agent_state === "awaiting_approval";
       return {
         sessionId: sid2,
         sessionTitle: (p.title as string) || s.sessionTitle,
         modelId: (p.model_id as number | null) ?? null,
-        messages: switched ? [] : s.messages,
+        messages: switched
+          ? []
+          : s.messages.map((m) => ({ ...m, streaming: Boolean(m.streaming && live) })),
         toolCalls: switched ? [] : s.toolCalls,
         pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
@@ -108,7 +129,13 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
           if (s.sessionId !== sid2) return {};
           const fromRest = rows
             .filter((r) => r.agent_id === "main")
-            .map((r) => ({ call_id: r.tool_call_id, name: r.name, args: r.args, result: r.result }));
+            .map((r) => ({
+              call_id: r.tool_call_id,
+              name: r.name,
+              args: r.args,
+              result: r.result && typeof r.result === "object" && r.result !== null && "text" in r.result ? (r.result as { text?: unknown }).text : r.result,
+              diff: extractDiff(r.name, r.args, r.result),
+            }));
           const restIds = new Set(fromRest.map((t) => t.call_id));
           const liveById = new Map(s.toolCalls.map((t) => [t.call_id, t]));
           const merged = fromRest.map((t) => liveById.get(t.call_id) ?? t);
@@ -130,9 +157,16 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   });
 
   wsClient.on("session.update", (p) => {
+    const patch: Partial<State> = {};
     if (Array.isArray(p.session_allow_rules)) {
-      set({ sessionAllowRules: p.session_allow_rules as State["sessionAllowRules"] });
+      patch.sessionAllowRules = p.session_allow_rules as State["sessionAllowRules"];
     }
+    if (typeof p.title === "string") {
+      patch.sessionTitle = p.title;
+      const sid = (p.session_id as string) || get().sessionId;
+      patch.sessionRows = get().sessionRows.map((r) => (r.id === sid ? { ...r, title: p.title as string } : r));
+    }
+    if (Object.keys(patch).length) set(patch);
   });
 
   wsClient.on("agent.state", (p) => {
@@ -201,10 +235,31 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     set((s) => ({ toolCalls: [...s.toolCalls, { call_id: p.call_id as string, name: p.name as string, args: p.args }] }));
   });
   wsClient.on("tool.result", (p) =>
-    set((s) => ({ toolCalls: s.toolCalls.map((t) => (t.call_id === p.call_id ? { ...t, result: p.result } : t)) })),
+    set((s) => ({
+      toolCalls: s.toolCalls.map((t) =>
+        t.call_id === p.call_id
+          ? {
+              ...t,
+              result: p.result,
+              progress: undefined,
+              diff: (p.diff as FileDiffPayload | undefined) || extractDiff(t.name, t.args, p.result) || t.diff,
+            }
+          : t,
+      ),
+    })),
   );
+  wsClient.on("tool.progress", (p) => {
+    if (p.subagent_id) return;
+    set((s) => ({
+      toolCalls: s.toolCalls.map((t) => (t.call_id === p.call_id ? { ...t, progress: String(p.tail || "") } : t)),
+    }));
+  });
   wsClient.on("approval.request", (p) =>
-    set((s) => ({ pendingApprovals: [...s.pendingApprovals, p as unknown as Approval] })),
+    set((s) => {
+      const next = p as unknown as Approval;
+      if (s.pendingApprovals.some((a) => a.approval_id === next.approval_id)) return {};
+      return { pendingApprovals: [...s.pendingApprovals, next] };
+    }),
   );
   wsClient.on("approval.resolved", (p) =>
     set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== p.approval_id) })),
@@ -322,6 +377,19 @@ export const useAgentStore = create<State>((set, get) => ({
     const row = await rest.patchSession(sid, { model_id: modelId });
     set({ modelId: row.model_id, sendBlockedReason: "" });
     await get().refreshSessions();
+  },
+
+  renameSession: async (id, title) => {
+    const row = await rest.patchSession(id, { title });
+    set((s) => ({
+      sessionRows: s.sessionRows.map((r) => (r.id === id ? row : r)),
+      sessionTitle: s.sessionId === id ? row.title : s.sessionTitle,
+    }));
+  },
+
+  stopAgent: () => {
+    const sid = get().sessionId;
+    if (sid) wsClient.send("agent.stop", { agent_id: sid });
   },
 
   deleteSession: async (id) => {

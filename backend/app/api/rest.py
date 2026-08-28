@@ -552,4 +552,11 @@ async def api_status():
         n_models = await count_models()
     except Exception as e:
         logger.debug("count_models failed: %s", e)
-    return {"mysql": is_available(), "models": n_models, "encryption": encryption_ready()}
+    redis_ok = False
+    try:
+        from app.core.rtstore import redis_available
+
+        redis_ok = await redis_available()
+    except Exception as e:
+        logger.debug("redis status failed: %s", e)
+    return {"mysql": is_available(), "redis": redis_ok, "models": n_models, "encryption": encryption_ready()}

@@ -168,6 +168,21 @@ async def save_summary(session_id: str, summary: str | None) -> None:
     await update_session_fields(session_id, summary=summary)
 
 
+async def maybe_autotitle(session_id: str, content: str) -> str | None:
+    """首条用户消息把占位标题换成摘要。已有自定义标题则不动。"""
+    title = " ".join((content or "").strip().split())[:40]
+    if not title:
+        return None
+    row = await get_session(session_id)
+    if row is None:
+        return None
+    current = row.title or ""
+    if current not in ("New Session", f"Session {session_id[:8]}", "") and not current.startswith("Session "):
+        return None
+    await update_session_fields(session_id, title=title)
+    return title
+
+
 # ---------- messages ----------
 
 

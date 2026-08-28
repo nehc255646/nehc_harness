@@ -4,10 +4,20 @@
 
 :root {
   --color-accent: #22d3ee;
+  --color-accent-hover: #06b6d4;
+  --color-accent-fg: #000000;
+  --color-accent-dim: rgba(34, 211, 238, 0.18);
+  --color-accent-glow: rgba(34, 211, 238, 0.55);
   --color-bg: #0a0a0a;
+}
+
+html,
+body,
+#root {
+  background: var(--color-bg);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #333 #0a0a0a;
+  scrollbar-color: #333 var(--color-bg);
 }

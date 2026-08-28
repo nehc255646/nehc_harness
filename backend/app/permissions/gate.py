@@ -31,16 +31,32 @@ class ApprovalGate:
     # ---------- 会话规则 ----------
 
     def get_session_rules(self, session_id: str) -> list[dict]:
-        return self._session_rules.get(session_id, [])
+        return list(self._session_rules.get(session_id, []))
 
-    def add_session_rule(self, session_id: str, rule: dict) -> None:
+    def add_session_rule(self, session_id: str, rule: dict, persist: bool = True) -> None:
         lst = self._session_rules.setdefault(session_id, [])
         if rule not in lst:
             lst.append(rule)
             logger.info("Session rule added: %s %s", session_id, rule)
+        if persist:
+            self._persist_rules(session_id)
 
     def clear_session_rules(self, session_id: str) -> None:
         self._session_rules.pop(session_id, None)
+        try:
+            from app.core.rtstore import delete_session_rules, fire_and_forget
+
+            fire_and_forget(delete_session_rules(session_id))
+        except Exception:
+            logger.debug("clear session rules redis failed", exc_info=True)
+
+    def _persist_rules(self, session_id: str) -> None:
+        try:
+            from app.core.rtstore import fire_and_forget, set_session_rules
+
+            fire_and_forget(set_session_rules(session_id, self.get_session_rules(session_id)))
+        except Exception:
+            logger.debug("persist session rules failed", exc_info=True)
 
     # ---------- 审批 ----------
 
@@ -61,6 +77,25 @@ class ApprovalGate:
         )
         self._pending[approval_id] = pending
         logger.info("Approval requested: %s tool=%s session=%s", approval_id, tool, session_id)
+        try:
+            from app.core.rtstore import fire_and_forget, put_pending
+
+            fire_and_forget(
+                put_pending(
+                    session_id,
+                    approval_id,
+                    {
+                        "approval_id": approval_id,
+                        "session_id": session_id,
+                        "agent_id": agent_id,
+                        "tool": tool,
+                        "args": args,
+                        "reason": reason,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("persist pending failed", exc_info=True)
         return approval_id, fut
 
     def resolve(self, approval_id: str, decision: str, reason: str = "user") -> bool:
@@ -76,6 +111,12 @@ class ApprovalGate:
             # 已被 wait_for 超时取消：仅清理残留，不再写结果
             if pending.future.cancelled():
                 self._pending.pop(approval_id, None)
+                try:
+                    from app.core.rtstore import delete_pending, fire_and_forget
+
+                    fire_and_forget(delete_pending(pending.session_id, approval_id))
+                except Exception:
+                    logger.debug("delete cancelled pending redis failed", exc_info=True)
                 logger.info("Approval cleaned after cancel: %s", approval_id)
                 return True
             return False
@@ -96,9 +137,14 @@ class ApprovalGate:
         if not pending.future.done():
             pending.future.set_result((approved, decision, reason))
         pending.decision = decision
-        # 保留片刻供查询，随后清理 (由调用方在消费后清理，或超时清理)
-        # 这里立即从 pending 移除，已通过 future 传递结果
+        # 立即从 pending 移除，已通过 future 传递结果
         self._pending.pop(approval_id, None)
+        try:
+            from app.core.rtstore import delete_pending, fire_and_forget
+
+            fire_and_forget(delete_pending(pending.session_id, approval_id))
+        except Exception:
+            logger.debug("delete pending redis failed", exc_info=True)
         logger.info("Approval resolved: %s -> %s (%s)", approval_id, decision, reason)
         return True
 
@@ -109,6 +155,12 @@ class ApprovalGate:
                 p.future.set_result((False, "rejected", reason))
                 self._pending.pop(aid, None)
                 logger.info("Approval auto-rejected: %s reason=%s", aid, reason)
+        try:
+            from app.core.rtstore import fire_and_forget, replace_pending
+
+            fire_and_forget(replace_pending(session_id, []))
+        except Exception:
+            logger.debug("clear pending redis failed", exc_info=True)
 
     def list_pending(self, session_id: str | None = None) -> list[PendingApproval]:
         if session_id is None:

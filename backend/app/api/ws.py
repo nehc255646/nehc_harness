@@ -8,6 +8,7 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agent.manager import manager
+from app.core import rtstore
 from app.core.config import settings
 from app.core.errors import ErrorCode
 from app.permissions.gate import gate
@@ -221,11 +222,35 @@ async def ws_endpoint(ws: WebSocket):
 
 
 async def _send_hello(ws: WebSocket, session_id: str, agent):
+    # PLAN §2.5：内存 + DB 合成真实状态回写 Redis；TTL 过期不作结束判定
+    try:
+        await rtstore.set_agent_state(session_id, getattr(agent, "agent_id", "main"), agent.state)
+    except Exception:
+        logger.debug("hello write agent state failed", exc_info=True)
+
+    live = gate.list_pending(session_id)
     pending = [
-        {"approval_id": p.approval_id, "tool": p.tool, "args": p.args, "reason": p.reason}
-        for p in gate.list_pending(session_id)
+        {"approval_id": p.approval_id, "agent_id": p.agent_id, "tool": p.tool, "args": p.args, "reason": p.reason}
+        for p in live
     ]
+    try:
+        await rtstore.replace_pending(session_id, pending)
+    except Exception:
+        logger.debug("hello replace pending failed", exc_info=True)
+
     session_rules = gate.get_session_rules(session_id)
+    if not session_rules:
+        try:
+            session_rules = await rtstore.get_session_rules(session_id)
+        except Exception:
+            session_rules = []
+        for rule in session_rules:
+            gate.add_session_rule(session_id, rule, persist=False)
+    else:
+        try:
+            await rtstore.set_session_rules(session_id, session_rules)
+        except Exception:
+            logger.debug("hello write session rules failed", exc_info=True)
     try:
         from app.agent.subagent import get_panels, get_workers
 

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -59,8 +60,17 @@ def shell(command: str) -> str:
         return f"[错误] 执行失败: {e}"
 
 
-async def shell_async(command: str, timeout: int | None = None, group: str | None = None) -> tuple[str, int]:
-    """异步 shell 执行，含进程组回收，返回 (output, returncode)"""
+_PROGRESS_INTERVAL_S = 0.3
+_PROGRESS_TAIL = 4000
+
+
+async def shell_async(
+    command: str,
+    timeout: int | None = None,
+    group: str | None = None,
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
+) -> tuple[str, int]:
+    """异步 shell 执行，含进程组回收，返回 (output, returncode)。长输出经 on_progress 节流推尾部。"""
     wd = _workdir()
     timeout = timeout or settings.shell_timeout
     key = group or "global"
@@ -79,9 +89,44 @@ async def shell_async(command: str, timeout: int | None = None, group: str | Non
     except Exception as e:
         logger.debug("Track pgid failed: %s", e)
 
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    last_emit = 0.0
+
+    async def _maybe_progress(force: bool = False) -> None:
+        nonlocal last_emit
+        if on_progress is None:
+            return
+        now = time.monotonic()
+        if not force and last_emit and now - last_emit < _PROGRESS_INTERVAL_S:
+            return
+        last_emit = now
+        raw = b"".join(stdout_chunks) + b"".join(stderr_chunks)
+        tail = raw[-_PROGRESS_TAIL:].decode(errors="ignore")
+        if not tail:
+            return
+        try:
+            await on_progress(tail)
+        except Exception:
+            logger.debug("shell on_progress failed", exc_info=True)
+
+    async def _pump(stream, bucket: list[bytes]) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(2048)
+            if not chunk:
+                break
+            bucket.append(chunk)
+            await _maybe_progress()
+
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        output = (stdout.decode(errors="ignore") if stdout else "") + (stderr.decode(errors="ignore") if stderr else "")
+        await asyncio.wait_for(
+            asyncio.gather(_pump(proc.stdout, stdout_chunks), _pump(proc.stderr, stderr_chunks)),
+            timeout=timeout,
+        )
+        await proc.wait()
+        output = (b"".join(stdout_chunks).decode(errors="ignore")) + (b"".join(stderr_chunks).decode(errors="ignore"))
         if not output:
             output = f"[退出码 {proc.returncode}] (无输出)"
         else:

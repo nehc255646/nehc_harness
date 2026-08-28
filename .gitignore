@@ -41,3 +41,8 @@ backend/.venv/
 frontend/dist/
 frontend/node_modules/
 *.tsbuildinfo
+
+# Local planning notes (not published)
+DESIGN.md
+PLAN.md
+Status_Issues.md

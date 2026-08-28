@@ -48,7 +48,7 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
       <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-cyan-400">模型与供应商</h2>
+          <h2 className="text-sm font-semibold text-accent">模型与供应商</h2>
           <button onClick={onClose} className="text-xs text-zinc-400 hover:text-white">
             关闭
           </button>
@@ -65,7 +65,7 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
             <input placeholder="api_key" type="password" className="col-span-2 rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
           </div>
           <button
-            className="rounded bg-cyan-500 px-3 py-1 text-xs text-black"
+            className="rounded bg-accent px-3 py-1 text-xs text-accent-fg"
             onClick={async () => {
               setErr("");
               try {
@@ -91,7 +91,7 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
               </span>
               <div className="flex gap-2">
                 <button
-                  className="text-cyan-400"
+                  className="text-accent"
                   onClick={async () => {
                     const r = await rest.testProvider(p.id);
                     setTestMsg(r.ok ? `hello ok: ${r.reply || ""}` : `hello 失败: ${r.error || ""}（仍可保存）`);
@@ -131,7 +131,7 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
             <input placeholder="context_window" type="number" className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1 text-xs" value={modelForm.context_window} onChange={(e) => setModelForm({ ...modelForm, context_window: Number(e.target.value) })} />
           </div>
           <button
-            className="rounded bg-cyan-500 px-3 py-1 text-xs text-black"
+            className="rounded bg-accent px-3 py-1 text-xs text-accent-fg"
             onClick={async () => {
               if (!modelForm.providerId) return setErr("请选择供应商");
               try {
@@ -160,7 +160,7 @@ export default function ModelSettings({ open, onClose, onChanged }: { open: bool
               </span>
               <div className="flex gap-2">
                 <button
-                  className="text-cyan-400"
+                  className="text-accent"
                   onClick={async () => {
                     await rest.putDefaultModel(m.id);
                     await reload();

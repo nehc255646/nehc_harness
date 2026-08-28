@@ -3,7 +3,9 @@
 from app.agent.context import (
     build_messages,
     estimate_tokens,
+    next_summary_cache,
     should_summarize,
+    slid_fingerprint,
     truncate_tool_result,
     window_slice,
 )
@@ -66,3 +68,32 @@ def test_window_slice_snaps_tool_group_boundary():
     assert window[0]["role"] != "tool"
     assert window[0].get("tool_calls"), "窗口应包含完整 assistant(tool_calls) 组"
     assert len(window) == 5
+
+
+def test_summary_cache_version_increments_on_success():
+    slid = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    fp = slid_fingerprint(slid)
+    first = next_summary_cache(None, "摘要1", 2, fp)
+    assert first["version"] == 1
+    assert first["covered_count"] == 2
+    assert first["pending_slid"] == []
+    second = next_summary_cache(first, "摘要2", 4, "ffff")
+    assert second["version"] == 2
+    assert second["covered_count"] == 6
+    assert second["text"] == "摘要2"
+
+
+def test_summary_cache_keeps_pending_on_failure():
+    slid = [{"role": "user", "content": "old"}]
+    failed = next_summary_cache({"text": "旧", "version": 3, "covered_count": 10}, None, 1, "x", pending_slid=slid)
+    assert failed["version"] == 3
+    assert failed["covered_count"] == 10
+    assert failed["text"] == "旧"
+    assert failed["pending_slid"] == slid
+
+
+def test_slid_fingerprint_stable():
+    a = [{"role": "user", "content": "x"}]
+    b = [{"role": "user", "content": "x"}]
+    assert slid_fingerprint(a) == slid_fingerprint(b)
+    assert slid_fingerprint(a) != slid_fingerprint([{"role": "user", "content": "y"}])

@@ -11,6 +11,57 @@ from app.core.config import settings
 
 logger = logging.getLogger("harness.files")
 
+_DIFF_CAP = 20000
+
+
+def _cap_diff_text(s: str) -> str:
+    if len(s) <= _DIFF_CAP:
+        return s
+    half = _DIFF_CAP // 2
+    return s[:half] + f"\n...[截断 {len(s) - _DIFF_CAP} 字符]...\n" + s[-half:]
+
+
+def make_diff_payload(path: str, old_text: str, new_text: str) -> dict:
+    return {"path": path, "old_text": _cap_diff_text(old_text), "new_text": _cap_diff_text(new_text)}
+
+
+def apply_write(path: str, content: str) -> tuple[str, dict | None]:
+    """写入文件。返回 (给模型的文本, 可选 {diff})。"""
+    target = _resolve(path)
+    if target is None:
+        return f"[错误] 越权路径: {path}", None
+    try:
+        old = ""
+        if target.exists() and target.is_file():
+            old = target.read_text(encoding="utf-8", errors="ignore")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        msg = f"[成功] 已写入 {path} ({len(content)} 字符)"
+        return msg, {"diff": make_diff_payload(path, old, content)}
+    except Exception as e:
+        return f"[错误] 写入失败: {e}", None
+
+
+def apply_edit(path: str, old_string: str, new_string: str) -> tuple[str, dict | None]:
+    """精确替换。返回 (给模型的文本, 可选 {diff})。"""
+    target = _resolve(path)
+    if target is None:
+        return f"[错误] 越权路径: {path}", None
+    if not target.exists():
+        return f"[错误] 文件不存在: {path}", None
+    try:
+        text = target.read_text(encoding="utf-8", errors="ignore")
+        if old_string not in text:
+            return "[错误] 未找到 old_string", None
+        if text.count(old_string) > 1:
+            return "[错误] old_string 匹配到多处，请提供更大上下文", None
+        new_text = text.replace(old_string, new_string, 1)
+        target.write_text(new_text, encoding="utf-8")
+        msg = f"[成功] 已编辑 {path}"
+        return msg, {"diff": make_diff_payload(path, text, new_text)}
+    except Exception as e:
+        return f"[错误] 编辑失败: {e}", None
+
 
 def _workdir() -> Path:
     p = Path(settings.workdir)
@@ -55,36 +106,15 @@ def read(path: str) -> str:
 @tool
 def write(path: str, content: str) -> str:
     """写入文件（覆盖）。参数: path, content"""
-    target = _resolve(path)
-    if target is None:
-        return f"[错误] 越权路径: {path}"
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return f"[成功] 已写入 {path} ({len(content)} 字符)"
-    except Exception as e:
-        return f"[错误] 写入失败: {e}"
+    msg, _extra = apply_write(path, content)
+    return msg
 
 
 @tool
 def edit(path: str, old_string: str, new_string: str) -> str:
     """精确字符串替换。参数: path, old_string, new_string。old_string 必须唯一匹配。"""
-    target = _resolve(path)
-    if target is None:
-        return f"[错误] 越权路径: {path}"
-    if not target.exists():
-        return f"[错误] 文件不存在: {path}"
-    try:
-        text = target.read_text(encoding="utf-8", errors="ignore")
-        if old_string not in text:
-            return "[错误] 未找到 old_string"
-        if text.count(old_string) > 1:
-            return "[错误] old_string 匹配到多处，请提供更大上下文"
-        text = text.replace(old_string, new_string, 1)
-        target.write_text(text, encoding="utf-8")
-        return f"[成功] 已编辑 {path}"
-    except Exception as e:
-        return f"[错误] 编辑失败: {e}"
+    msg, _extra = apply_edit(path, old_string, new_string)
+    return msg
 
 
 @tool

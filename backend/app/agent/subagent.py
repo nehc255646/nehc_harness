@@ -220,6 +220,12 @@ class SubAgentLoop:
 
     async def run(self):
         logger.info("SubAgent run start: %s kind=%s session=%s", self.subagent_id, self.kind, self.session_id)
+        try:
+            from app.core import rtstore
+
+            await rtstore.set_agent_state(self.session_id, self.subagent_id, "running")
+        except Exception:
+            logger.debug("subagent state redis failed", exc_info=True)
         await self.bind_session_executor()
         # 通知前端 opened 已在 spawn 时广播，此处再补一次 worker.status
         if self.kind == "worker":
@@ -366,6 +372,12 @@ class SubAgentLoop:
             if main_agent and main_agent.state == "done":
                 rec.late = True
         self.state = status if status in ("done", "error") else "done"
+        try:
+            from app.core import rtstore
+
+            await rtstore.set_agent_state(self.session_id, self.subagent_id, self.state)
+        except Exception:
+            logger.debug("subagent finish state redis failed", exc_info=True)
 
         try:
             from app import persist as persist_mod
@@ -530,7 +542,7 @@ class SubAgentLoop:
         self,
         name: str,
         args: dict,
-        result: str,
+        result: str | dict,
         call_id: str,
         is_error: bool,
         decision: str,
@@ -558,6 +570,7 @@ class SubAgentLoop:
     ) -> dict:
         await _broadcast(self.session_id, "tool.start", {"call_id": call_id, "name": name, "args": args, "subagent_id": self.subagent_id}, self.broadcaster)
         is_error = False
+        diff = None
         try:
             if name == "shell":
                 command = args.get("command") or args.get("cmd") or ""
@@ -569,9 +582,33 @@ class SubAgentLoop:
                     return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 from app.tools.shell import shell_async
 
-                output, code = await shell_async(command, group=self.subagent_id)
+                async def _on_progress(tail: str):
+                    await _broadcast(
+                        self.session_id,
+                        "tool.progress",
+                        {"call_id": call_id, "tail": tail, "subagent_id": self.subagent_id},
+                        self.broadcaster,
+                    )
+
+                output, code = await shell_async(command, group=self.subagent_id, on_progress=_on_progress)
                 result = output
                 is_error = code != 0 and code != 124
+            elif name == "write":
+                from app.tools.files import apply_write
+
+                result, extra = apply_write(str(args.get("path") or ""), str(args.get("content") or ""))
+                diff = (extra or {}).get("diff")
+                is_error = str(result).startswith("[错误]")
+            elif name == "edit":
+                from app.tools.files import apply_edit
+
+                result, extra = apply_edit(
+                    str(args.get("path") or ""),
+                    str(args.get("old_string") or ""),
+                    str(args.get("new_string") or ""),
+                )
+                diff = (extra or {}).get("diff")
+                is_error = str(result).startswith("[错误]")
             else:
                 tool_obj = WORKER_TOOL_MAP.get(name)
                 if not tool_obj:
@@ -583,10 +620,23 @@ class SubAgentLoop:
                     except Exception:
                         result = tool_obj.invoke(args)  # type: ignore
                     result = str(result)
-                    result = truncate_tool_result(result, settings.max_tool_result_tokens)
-            await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": is_error, "subagent_id": self.subagent_id}, self.broadcaster)
-            await self._persist_worker_log(name, args, result, call_id, is_error, decision, reason or None)
-            return {"call_id": call_id, "name": name, "result": result, "is_error": is_error}
+                    is_error = str(result).startswith("[错误]")
+            full_text = str(result)
+            injected = truncate_tool_result(full_text, settings.max_tool_result_tokens)
+            stored: dict | str = {"text": full_text}
+            if diff:
+                stored["diff"] = diff
+            payload = {
+                "call_id": call_id,
+                "result": injected,
+                "is_error": is_error,
+                "subagent_id": self.subagent_id,
+            }
+            if diff:
+                payload["diff"] = diff
+            await _broadcast(self.session_id, "tool.result", payload, self.broadcaster)
+            await self._persist_worker_log(name, args, stored, call_id, is_error, decision, reason or None)
+            return {"call_id": call_id, "name": name, "result": injected, "is_error": is_error}
         except Exception as e:
             result = f"[异常] {name} 执行失败: {e}"
             await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": True, "subagent_id": self.subagent_id}, self.broadcaster)
