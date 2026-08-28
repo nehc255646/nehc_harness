@@ -4,11 +4,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Database
+    # Database — 凭据由 .env 提供，代码内不留默认密码
     mysql_host: str = "localhost"
     mysql_port: int = 3306
     mysql_user: str = "harness"
-    mysql_password: str = "harness_dev"
+    mysql_password: str = ""
     mysql_database: str = "harness"
 
     # Redis

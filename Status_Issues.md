@@ -32,5 +32,16 @@
 - D1 测试：修 3 个 ruff 告警（SIM117/RUF059），新增 6 项回归 — done 唤醒/emit record 不入 history/heuristic 文本去重/交互型 stop/单 worker 批次聚合清理/glob 逃逸过滤
 - 验证：`ruff` 0 告警 / `pytest 27 passed` / `tsc --noEmit` / `eslint` / `vite build` 通过；WS 冒烟 hello=idle、多轮续聊、`rm -r -f` 拦截均通过
 
+## 代码审查修复 (2026-08-28，M2 后全量审查)
+- H1 迟到批次不唤醒：`_handle_worker_finish` 迟到路径仅广播 `worker.batch_done`/`worker.status` 供前端观测，不再注入主队列（原无条件 enqueue 会经 A1 唤醒逻辑拉起已 done 的主 agent，违反 PLAN §2.4）
+- H2 流式 tool_calls args 修复：抽公共助手 `context.accumulate_tool_calls`/`parse_tool_calls`（dict/对象双形态兼容）；args 字符串碎片拼接、已解析 dict 整体覆盖（原 chunk 双属性覆盖导致 `json.loads(dict)` TypeError → `{"__raw":...}` → shell 空命令静默执行）；ainvoke 回退路径 dict args 直接保留（原 `str(dict)` 单引号解析失败）；loop/subagent 两处重复解析代码一并消除
+- M1 子 agent 纯文本 history 双重追加去除：`_emit_text` 已入 history，纯文本分支不再重复 append
+- M2 每轮派生上限真实生效：`_turn_spawned` 按轮累计（检查+累加无 await 原子），跨多次 `spawn_worker`/`spawn_workers` 调用共享额度；删除死字段 `_current_batch_id`/`_batch_spawned`
+- M3 worker 超时孤儿进程：`SubAgentLoop.run` finally 统一 `kill_shell_group(subagent_id)`；`shell_async` 仅在进程已结束时移除 pgid 登记（取消时保留供外层回收）
+- awaiting_approval 展示态：审批挂起/恢复时广播 `agent.state`（并行多审批以 pending 表判定、stop 路径不回 running）
+- 杂项：ws 会话迁移空连接集清理（`_detach_connection`）；CORS 移除 credentials；`rules.py` yaml mtime 缓存；`config.py` 移除代码内默认 MySQL 密码
+- 前端：子 agent 流式消息按 `subagent_id` 路由进侧栏面板对话（原混入主 Chat）；面板渲染对话记录/迟到标记/收起按钮（收起≠终止）；WorkerStatus 增加 running 项停止按钮；`sendSubagentMessage` 去本地回显（服务端统一广播防重复气泡）；hello 对账保留面板已有对话
+- 测试：新增 7 项回归（碎片拼接/dict args 不损坏/迟到不唤醒/交互型 history 去重/每轮派生上限/取消 pgid 保留/）；验证 `ruff` 0 告警 / `pytest 34 passed` / `tsc` / `eslint` / `vite build` / WS 冒烟（派生→对话→回投→消费、黑名单拦截）全部通过
+
 ## 待办 M3
 - SQLAlchemy + Alembic + MySQL 持久化 + Provider/Model 分组 + 会话续聊

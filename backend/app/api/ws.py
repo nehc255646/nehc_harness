@@ -37,6 +37,15 @@ async def _loop_broadcaster(session_id: str, event: str, payload: dict):
     await broadcast(session_id, event, payload)
 
 
+def _detach_connection(ws: WebSocket, session_id: str) -> None:
+    """从会话连接表移除，空集一并清理"""
+    conns = _connections.get(session_id)
+    if conns and ws in conns:
+        conns.remove(ws)
+        if not conns:
+            _connections.pop(session_id, None)
+
+
 # 初始化 manager 广播器 (延迟，避免循环导入时无 loop)
 def _ensure_manager_broadcaster():
     manager.set_broadcaster(_loop_broadcaster)
@@ -162,9 +171,7 @@ async def ws_endpoint(ws: WebSocket):
             elif event == "session.create":
                 new_id = str(uuid.uuid4())
                 # 将当前连接迁移到新会话，事件广播随新 session 路由
-                old_conns = _connections.get(session_id)
-                if old_conns and ws in old_conns:
-                    old_conns.remove(ws)
+                _detach_connection(ws, session_id)
                 session_id = new_id
                 _connections.setdefault(session_id, set()).add(ws)
                 new_agent = manager.get_or_create(session_id)
@@ -191,9 +198,7 @@ async def ws_endpoint(ws: WebSocket):
                 # 切换会话 — 重新握手
                 new_sid = payload.get("session_id", session_id)
                 # 将当前连接迁移
-                old_conns = _connections.get(session_id)
-                if old_conns and ws in old_conns:
-                    old_conns.remove(ws)
+                _detach_connection(ws, session_id)
                 session_id = new_sid
                 _connections.setdefault(session_id, set()).add(ws)
                 new_agent = manager.get_or_create(session_id)
@@ -260,12 +265,7 @@ async def ws_endpoint(ws: WebSocket):
             await heartbeat_task
         except asyncio.CancelledError:
             pass
-        conns = _connections.get(session_id)
-        if conns and ws in conns:
-            conns.remove(ws)
-            if not conns:
-                _connections.pop(session_id, None)
-                # 延迟拒绝 pending? 保留超时机制，不立即清理
+        _detach_connection(ws, session_id)
 
 
 async def _heartbeat(ws: WebSocket, pong_evt: asyncio.Event):

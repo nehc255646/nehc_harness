@@ -8,7 +8,7 @@ import yaml
 from app.core.config import settings
 
 
-def _load_yaml() -> dict:
+def _rules_path() -> Path:
     path = Path(settings.allow_rules_file)
     if not path.is_absolute():
         # 相对于项目根 (backend/..)
@@ -16,12 +16,26 @@ def _load_yaml() -> dict:
         # 兼容启动目录为 backend 时
         if not path.exists():
             path = Path(settings.allow_rules_file).resolve()
+    return path
+
+
+# mtime 缓存：避免每次工具调用都重读文件，文件变更自动失效
+_yaml_cache: dict = {"mtime": None, "data": {}}
+
+
+def _load_yaml() -> dict:
+    path = _rules_path()
     if not path.exists():
         return {}
     try:
+        mtime = path.stat().st_mtime
+        if _yaml_cache["mtime"] == mtime:
+            return _yaml_cache["data"]
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-            return data
+        _yaml_cache["mtime"] = mtime
+        _yaml_cache["data"] = data
+        return data
     except Exception:
         return {}
 

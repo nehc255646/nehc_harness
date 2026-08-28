@@ -1,11 +1,20 @@
 import { create } from "zustand";
 import { wsClient } from "../api/ws";
 
-type Message = { id: string; role: string; content: string; streaming?: boolean; subagent_id?: string };
+type Message = { id: string; role: string; content: string; streaming?: boolean };
 type ToolCall = { call_id: string; name: string; args: unknown; result?: unknown };
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
-type SubPanel = { subagent_id: string; kind: string; task: string; status: string; result?: string };
-type WorkerItem = { subagent_id: string; task_summary: string; state: string; batch_id?: string };
+type SubPanelMessage = { id: string; role: string; content: string; streaming?: boolean };
+type SubPanel = {
+  subagent_id: string;
+  kind: string;
+  task: string;
+  status: string;
+  result?: string;
+  late?: boolean;
+  messages: SubPanelMessage[];
+};
+type WorkerItem = { subagent_id: string; task_summary: string; state: string; batch_id?: string; late?: boolean };
 type AgentState = "idle" | "running" | "awaiting_approval" | "done" | "error";
 
 type State = {
@@ -18,15 +27,29 @@ type State = {
   sessionId: string;
   sessions: string[];
   subPanels: SubPanel[];
+  dismissedPanels: string[];
   workers: WorkerItem[];
   sendMessage: (content: string) => void;
   sendSubagentMessage: (subagent_id: string, content: string) => void;
   respondApproval: (approval_id: string, decision: "approve" | "approve_similar" | "reject") => void;
+  dismissPanel: (subagent_id: string) => void;
+  stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
 };
 
 // 事件 handler 只注册一次（StrictMode/重复 connect 下不重复绑定）
 let handlersBound = false;
+
+// 子 agent 流式消息归属：message_id -> subagent_id
+const subMessageOwner = new Map<string, string>();
+
+function updateSubPanelMessages(
+  panels: SubPanel[],
+  subagentId: string,
+  fn: (msgs: SubPanelMessage[]) => SubPanelMessage[],
+): SubPanel[] {
+  return panels.map((x) => (x.subagent_id === subagentId ? { ...x, messages: fn(x.messages || []) } : x));
+}
 
 function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void, get: () => State) {
   if (handlersBound) return;
@@ -38,17 +61,25 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     // 断线恢复对账 — PLAN.md §2.5；新会话 (session 变化) 时清空展示
     const sid2 = p.session_id as string;
     wsClient.setSession(sid2);
-    set((s) => ({
-      sessionId: sid2,
-      sessions: s.sessions.includes(sid2) ? s.sessions : [...s.sessions, sid2],
-      messages: sid2 === s.sessionId ? s.messages : [],
-      toolCalls: sid2 === s.sessionId ? s.toolCalls : [],
-      pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
-      sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
-      subPanels: Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels,
-      workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
-      agentState: (p.agent_state as AgentState) || s.agentState,
-    }));
+    set((s) => {
+      const incomingPanels = Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels;
+      // 重连对账：保留本地已有面板的对话记录
+      const merged = incomingPanels.map((np) => {
+        const old = s.subPanels.find((x) => x.subagent_id === np.subagent_id);
+        return { ...np, messages: old?.messages || [] };
+      });
+      return {
+        sessionId: sid2,
+        sessions: s.sessions.includes(sid2) ? s.sessions : [...s.sessions, sid2],
+        messages: sid2 === s.sessionId ? s.messages : [],
+        toolCalls: sid2 === s.sessionId ? s.toolCalls : [],
+        pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
+        sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
+        subPanels: merged,
+        workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
+        agentState: (p.agent_state as AgentState) || s.agentState,
+      };
+    });
   });
 
   wsClient.on("session.update", (p) => {
@@ -63,12 +94,33 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
 
   wsClient.on("message.start", (p) => {
     const id = p.message_id as string;
+    const subagentId = p.subagent_id as string | undefined;
+    if (subagentId) {
+      // 子 agent 流式 → 侧栏面板
+      subMessageOwner.set(id, subagentId);
+      set((s) => ({
+        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => [
+          ...msgs,
+          { id, role: p.role as string, content: "", streaming: true },
+        ]),
+      }));
+      return;
+    }
     set((s) => ({ messages: [...s.messages, { id, role: p.role as string, content: "", streaming: true }] }));
   });
 
   wsClient.on("message.delta", (p) => {
     const id = p.message_id as string;
     const delta = p.delta as string;
+    const subagentId = subMessageOwner.get(id);
+    if (subagentId) {
+      set((s) => ({
+        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) =>
+          msgs.map((m) => (m.id === id ? { ...m, content: m.content + delta } : m)),
+        ),
+      }));
+      return;
+    }
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, content: m.content + delta } : m)),
     }));
@@ -76,6 +128,15 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
 
   wsClient.on("message.done", (p) => {
     const id = p.message_id as string;
+    const subagentId = subMessageOwner.get(id);
+    if (subagentId) {
+      set((s) => ({
+        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) =>
+          msgs.map((m) => (m.id === id ? { ...m, content: p.content as string, streaming: false } : m)),
+        ),
+      }));
+      return;
+    }
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, content: p.content as string, streaming: false } : m)),
     }));
@@ -100,7 +161,12 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     const panel = p as unknown as SubPanel;
     // interactive 侧栏，worker 忽略（由 worker.status 展示）
     if (panel.kind === "interactive") {
-      set((s) => ({ subPanels: [...s.subPanels.filter((x) => x.subagent_id !== panel.subagent_id), panel as SubPanel] }));
+      set((s) => ({
+        subPanels: [
+          ...s.subPanels.filter((x) => x.subagent_id !== panel.subagent_id),
+          { ...panel, messages: [] },
+        ],
+      }));
     }
   });
   wsClient.on("subagent.done", (p) => {
@@ -122,11 +188,15 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     }));
   });
   wsClient.on("subagent.message", (p) => {
+    // 用户侧栏输入的服务端回显 → 面板对话记录
     const sid = p.subagent_id as string;
     const content = p.content as string;
     const role = p.role as string;
     set((s) => ({
-      messages: [...s.messages, { id: `sub-${sid}-${Date.now()}`, role: role === "user" ? "user(sub)" : "assistant(sub)", content: `[${sid}] ${content}` }],
+      subPanels: updateSubPanelMessages(s.subPanels, sid, (msgs) => [
+        ...msgs,
+        { id: `sub-${sid}-${Date.now()}`, role, content },
+      ]),
     }));
   });
 }
@@ -141,6 +211,7 @@ export const useAgentStore = create<State>((set, get) => ({
   sessionId: "default",
   sessions: ["default"],
   subPanels: [],
+  dismissedPanels: [],
   workers: [],
 
   connect: (sessionId) => {
@@ -164,8 +235,16 @@ export const useAgentStore = create<State>((set, get) => ({
   },
   sendSubagentMessage: (subagent_id, content) => {
     const sid = get().sessionId;
+    // 回显由服务端 subagent.message 广播统一处理（含发送者本人），避免重复气泡
     wsClient.send("subagent.response", { session_id: sid, subagent_id, content });
-    // 本地回显
-    set((s) => ({ messages: [...s.messages, { id: `local-sub-${Date.now()}`, role: "user(sub)", content: `[->${subagent_id}] ${content}` }] }));
+  },
+  dismissPanel: (subagent_id) => {
+    // 仅收起 UI，不终止子 agent（PLAN §2.4）
+    set((s) => ({
+      dismissedPanels: s.dismissedPanels.includes(subagent_id) ? s.dismissedPanels : [...s.dismissedPanels, subagent_id],
+    }));
+  },
+  stopWorker: (subagent_id) => {
+    wsClient.send("agent.stop", { agent_id: subagent_id });
   },
 }));

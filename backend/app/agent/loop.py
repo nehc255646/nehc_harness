@@ -1,13 +1,17 @@
 """手写 asyncio loop — 对应 PLAN.md §2.1"""
 
 import asyncio
-import json
 import logging
 import time
 import uuid
 from collections.abc import Callable
 
-from app.agent.context import build_messages, truncate_tool_result
+from app.agent.context import (
+    accumulate_tool_calls,
+    build_messages,
+    parse_tool_calls,
+    truncate_tool_result,
+)
 from app.agent.executor import Executor
 from app.agent.prompts import SYSTEM_PROMPT
 from app.core.config import settings
@@ -39,9 +43,8 @@ class AgentLoop:
         self.executor = Executor()
         # 当前轮 pending 的消息 id，用于流式
         self._current_message_id: str | None = None
-        # M2 批量派生跟踪
-        self._current_batch_id: str | None = None
-        self._batch_spawned: int = 0
+        # 当前轮已派生工作型数量（防全量转包，跨多次 spawn 调用累计）
+        self._turn_spawned: int = 0
 
     # ---------- 对外接口 ----------
 
@@ -63,6 +66,7 @@ class AgentLoop:
             self._stop_event.clear()
             self._round = 0
             self.state = "idle"
+            self._turn_spawned = 0
             self._task = asyncio.create_task(self.run())
             logger.info("AgentLoop task started: session=%s", self.session_id)
 
@@ -203,7 +207,8 @@ class AgentLoop:
                     await self._emit_message(text, done=True, record=False)
                 # 检查 finish_task
                 has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
-                # 并行分发
+                # 并行分发（每轮重置派生计数）
+                self._turn_spawned = 0
                 tool_results = await self._dispatch_tools(tool_calls)
                 # 原子回填历史 (assistant tool_calls + tool results)
                 assistant_msg = {
@@ -299,30 +304,7 @@ class AgentLoop:
                 if delta:
                     text_parts.append(delta)
                     await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": delta})
-                # tool_calls chunk
-                tc_chunks = getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None)
-                if tc_chunks:
-                    for tc in tc_chunks:
-                        # langchain chunk 格式: {name, args, id, index}
-                        idx = getattr(tc, "index", 0) or 0
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {"name": "", "args": "", "id": "", "index": idx}
-                        if getattr(tc, "name", None):
-                            tool_calls_acc[idx]["name"] = tc.name
-                        if getattr(tc, "id", None):
-                            tool_calls_acc[idx]["id"] = tc.id
-                        if getattr(tc, "args", None):
-                            tool_calls_acc[idx]["args"] += tc.args
-                # 适配 AIMessageChunk.tool_calls 直接完整
-                if getattr(chunk, "tool_calls", None) and isinstance(chunk.tool_calls, list):  # type: ignore
-                    for tc in chunk.tool_calls:  # type: ignore
-                        idx = tc.get("index", len(tool_calls_acc))
-                        tool_calls_acc[idx] = {
-                            "name": tc.get("name", ""),
-                            "args": tc.get("args", ""),
-                            "id": tc.get("id", str(uuid.uuid4())),
-                            "index": idx,
-                        }
+                accumulate_tool_calls(tool_calls_acc, chunk)
         except Exception as e:
             # 若流式失败，尝试非流式
             logger.warning("Stream failed, fallback to ainvoke: %s", e)
@@ -333,9 +315,10 @@ class AgentLoop:
                 await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": text})
             raw_tcs = getattr(result, "tool_calls", None) or []
             for idx, tc in enumerate(raw_tcs):
+                # 非流式返回的 args 已是 dict，直接保留
                 tool_calls_acc[idx] = {
                     "name": tc.get("name", ""),
-                    "args": str(tc.get("args", "")),
+                    "args": tc.get("args", {}) if isinstance(tc.get("args", {}), dict) else str(tc.get("args", "")),
                     "id": tc.get("id", str(uuid.uuid4())),
                     "index": idx,
                 }
@@ -345,24 +328,7 @@ class AgentLoop:
         await self._broadcast("message.done", {"message_id": message_id, "role": "assistant", "content": full_text})
 
         # history 追加占位 (仅文本部分，tool_calls 后续统一回填) — 不在此落库，避免重复
-        # 解析 tool_calls
-        tool_calls = []
-        for idx in sorted(tool_calls_acc.keys()):
-            raw = tool_calls_acc[idx]
-            name = raw.get("name", "")
-            args_str = raw.get("args", "")
-            call_id = raw.get("id") or str(uuid.uuid4())
-            if not name:
-                continue
-            # args 可能是 JSON 字符串
-            try:
-                args = json.loads(args_str) if args_str else {}
-                if isinstance(args, str):
-                    args = json.loads(args)
-            except Exception:
-                args = {"__raw": args_str}
-            tool_calls.append({"name": name, "args": args, "id": call_id})
-
+        tool_calls = parse_tool_calls(tool_calls_acc)
         return {"text": full_text, "tool_calls": tool_calls, "streamed": True}
 
     def _heuristic_fallback(self, messages: list[dict]) -> dict:
@@ -518,6 +484,10 @@ class AgentLoop:
                 # 需审批 → 挂起 Future (tool.start 由 _execute_tool 执行时广播，避免重复)
                 approval_id, future = await gate.request_approval(self.session_id, self.agent_id, name, args, reason)
                 await self._broadcast("approval.request", {"approval_id": approval_id, "tool": name, "args": args, "reason": reason})
+                # 展示态：进入等待审批（PLAN §2.5）
+                if self.state != "awaiting_approval":
+                    self.state = "awaiting_approval"
+                    await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "awaiting_approval"})
                 # 等待审批 (带超时)
                 try:
                     approved, decision_val, resolve_reason = await asyncio.wait_for(future, timeout=settings.approval_timeout)
@@ -527,6 +497,13 @@ class AgentLoop:
                     result = f"[超时] 审批超时 ({settings.approval_timeout}s)，已拒绝: {name}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
                     return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                finally:
+                    # 审批结束：本 agent 无其余 pending 时才回运行态（并行多审批场景）；
+                    # stop 取消路径不回运行态，避免覆盖 done
+                    still_pending = any(p.agent_id == self.agent_id for p in gate.list_pending(self.session_id))
+                    if not self._stop_event.is_set() and self.state == "awaiting_approval" and not still_pending:
+                        self.state = "running"
+                        await self._broadcast("agent.state", {"agent_id": self.agent_id, "state": "running"})
 
                 # 已 resolve
                 await self._broadcast("approval.resolved", {"approval_id": approval_id, "approved": approved, "reason": resolve_reason})
@@ -557,6 +534,19 @@ class AgentLoop:
             return f"[错误] 子 agent 模块未就绪: {e}"
         # 获取主 agent 唤醒入口与 broadcaster（传 enqueue 而非裸 queue，保证终态后回投可唤醒）
         broadcaster = self.broadcaster
+        # 防全量转包：按轮累计派生数（检查+累加间无 await，事件循环内原子）
+        if name == "spawn_worker":
+            requested = 1
+        elif name == "spawn_workers":
+            tasks = args.get("tasks") or []
+            requested = len(tasks)
+        else:
+            requested = 0
+        if requested and self._turn_spawned + requested > settings.max_workers_per_turn:
+            return (
+                f"[拒绝] 单轮派生工作型总数不超过 {settings.max_workers_per_turn}，"
+                f"本轮已派生 {self._turn_spawned}，再请求 {requested}"
+            )
         if name == "spawn_subagent":
             behavior_desc = args.get("behavior_desc") or args.get("behavior") or ""
             goal = args.get("goal") or args.get("task") or ""
@@ -570,6 +560,7 @@ class AgentLoop:
             constraints = args.get("constraints") or ""
             if not task:
                 return "[错误] spawn_worker 需提供 task"
+            self._turn_spawned += 1
             return await spawn_worker_batch(
                 self.session_id, [task], self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )
@@ -578,7 +569,7 @@ class AgentLoop:
             constraints = args.get("constraints") or ""
             if not tasks:
                 return "[错误] spawn_workers 需提供 tasks 数组"
-            # 防全量转包：检查任务描述是否过于宽泛
+            self._turn_spawned += len(tasks)
             return await spawn_worker_batch(
                 self.session_id, tasks, self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
             )

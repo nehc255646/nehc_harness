@@ -2,7 +2,7 @@
 import { useAgentStore } from "../../store/agentStore";
 
 export default function WorkerStatus() {
-  const { workers } = useAgentStore();
+  const { workers, stopWorker } = useAgentStore();
 
   if (workers.length === 0) {
     return (
@@ -26,6 +26,15 @@ export default function WorkerStatus() {
             <span className="text-xs font-mono text-zinc-300">{w.subagent_id}</span>
             <span className="text-xs text-zinc-500 truncate max-w-40">{w.task_summary}</span>
             <span className="text-xs text-zinc-600">{w.state}</span>
+            {w.state === "running" && (
+              <button
+                onClick={() => stopWorker(w.subagent_id)}
+                title="终止该工作型子 agent"
+                className="rounded px-1 text-xs text-zinc-500 hover:bg-red-900/40 hover:text-red-300"
+              >
+                ✕
+              </button>
+            )}
           </div>
         ))}
       </div>

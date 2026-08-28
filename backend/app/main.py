@@ -27,11 +27,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agent Harness", version="0.1.0", lifespan=lifespan)
 
-# CORS — 允许 Vite dev server
+# CORS — 允许 Vite dev server（无 cookie 鉴权，不开 credentials）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

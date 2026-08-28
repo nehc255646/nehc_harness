@@ -109,7 +109,9 @@ async def shell_async(command: str, timeout: int | None = None, group: str | Non
             logger.debug("Communicate after timeout failed: %s", e)
         return f"[错误] 命令超时 ({timeout}s): {command[:100]}", 124
     finally:
-        if pgid:
+        # 仅在进程已结束时移除登记；被取消（worker 超时/stop）时保留 pgid，
+        # 交由外层 kill_shell_group 兜底回收，防孤儿进程
+        if pgid and proc.returncode is not None:
             s = _active_pgs.get(key)
             if s:
                 s.discard(pgid)

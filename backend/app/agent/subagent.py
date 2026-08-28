@@ -8,7 +8,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.agent.context import build_messages, truncate_tool_result
+from app.agent.context import (
+    accumulate_tool_calls,
+    build_messages,
+    parse_tool_calls,
+    truncate_tool_result,
+)
 from app.agent.executor import Executor
 from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
 from app.core.config import settings
@@ -233,8 +238,14 @@ class SubAgentLoop:
             logger.exception("SubAgent crashed: %s", self.subagent_id)
             await self._finish("error", f"[异常] {e}")
         finally:
-            # 清理 task 索引
+            # 清理 task 索引并回收本子 agent 的 shell 进程组（取消/超时时防孤儿进程）
             _tasks.pop(self.subagent_id, None)
+            try:
+                from app.tools.shell import kill_shell_group
+
+                kill_shell_group(self.subagent_id)
+            except Exception as e:
+                logger.debug("Cleanup subagent shell group failed: %s", e)
 
     async def _run_loop(self):
         while True:
@@ -321,27 +332,13 @@ class SubAgentLoop:
                         self.history.append({"role": "tool", "content": f"[忽略] 交互型不支持工具 {tc.get('name')}", "tool_call_id": tc.get("id", ""), "name": tc.get("name", "")})
                     continue
             else:
-                # 纯文本
+                # 纯文本（text 已随 _emit_text/流式路径入 history，此处不再追加）
                 if not text and self.kind == "worker":
                     # 工作型无文本无工具 -> 尝试完成
                     await self._finish("done", "(空响应，任务结束)")
                     break
-                if self.kind == "interactive":
-                    # 交互型纯文本：补 history，继续等待用户
-                    if not already_streamed and text:
-                        self.history.append({"role": "assistant", "content": text})
-                    # 广播子 agent 消息流
-                    continue
-                else:
-                    # 工作型纯文本：若未 finish，继续下一轮或结束
-                    if not text:
-                        text = "(模型无返回)"
-                        await self._emit_text(text)
-                    else:
-                        if not already_streamed:
-                            self.history.append({"role": "assistant", "content": text})
-                    # 工作型自主：无工具则视为需继续
-                    continue
+                # 交互型：继续等待用户侧栏输入；工作型：自主继续下一轮
+                continue
 
     async def _finish(self, status: str, result: str):
         rec = _subagents.get(self.subagent_id)
@@ -390,7 +387,6 @@ class SubAgentLoop:
             {"agent_id": self.subagent_id, "message_id": message_id, "role": "assistant", "subagent_id": self.subagent_id},
             self.broadcaster,
         )
-        import json as _json
 
         text_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
@@ -405,18 +401,7 @@ class SubAgentLoop:
                     {"agent_id": self.subagent_id, "message_id": message_id, "delta": delta, "subagent_id": self.subagent_id},
                     self.broadcaster,
                 )
-            tc_chunks = getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None)
-            if tc_chunks:
-                for tc in tc_chunks:
-                    idx = getattr(tc, "index", 0) or 0
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {"name": "", "args": "", "id": "", "index": idx}
-                    if getattr(tc, "name", None):
-                        tool_calls_acc[idx]["name"] = tc.name
-                    if getattr(tc, "id", None):
-                        tool_calls_acc[idx]["id"] = tc.id
-                    if getattr(tc, "args", None):
-                        tool_calls_acc[idx]["args"] += tc.args
+            accumulate_tool_calls(tool_calls_acc, chunk)
 
         full_text = "".join(text_parts)
         await _broadcast(
@@ -425,22 +410,7 @@ class SubAgentLoop:
             {"message_id": message_id, "role": "assistant", "content": full_text, "subagent_id": self.subagent_id},
             self.broadcaster,
         )
-        # 解析 tool_calls
-        tool_calls = []
-        for idx in sorted(tool_calls_acc.keys()):
-            raw = tool_calls_acc[idx]
-            name = raw.get("name", "")
-            args_str = raw.get("args", "")
-            call_id = raw.get("id") or str(uuid.uuid4())
-            if not name:
-                continue
-            try:
-                args = _json.loads(args_str) if args_str else {}
-                if isinstance(args, str):
-                    args = _json.loads(args)
-            except Exception:
-                args = {"__raw": args_str}
-            tool_calls.append({"name": name, "args": args, "id": call_id})
+        tool_calls = parse_tool_calls(tool_calls_acc)
         return {"text": full_text, "tool_calls": tool_calls, "streamed": True}
 
     def _heuristic_fallback(self, messages: list[dict]) -> dict:
@@ -590,6 +560,11 @@ class SubAgentLoop:
             payload = {"batch_id": rec.batch_id, "workers": workers_payload}
             # 先清理防止并发重复
             _batches.pop(rec.batch_id, None)
+            if late:
+                # 迟到：仅广播供前端观测，不注入主队列（不唤醒已 done 的主 agent，PLAN §2.4）
+                await _broadcast(self.session_id, "worker.batch_done", payload, self.broadcaster)
+                await _broadcast(self.session_id, "worker.status", {"workers": get_workers(self.session_id)}, self.broadcaster)
+                return
             # 注入主队列
             try:
                 await self.main_enqueue({"type": "worker_batch_done", "payload": payload})
