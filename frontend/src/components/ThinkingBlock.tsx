@@ -23,7 +23,9 @@ export default function ThinkingBlock({
         <span className={`transition ${open ? "rotate-90" : ""}`}>
           <IconChevron className="h-3 w-3" />
         </span>
-        <span className={streaming ? "animate-pulse" : ""}>思考中</span>
+        <span className={streaming ? "animate-pulse" : ""}>
+          {streaming ? "思考中" : "已完成思考"}
+        </span>
       </button>
       {open && (
         <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap font-sans text-[12px] leading-5 text-faint">

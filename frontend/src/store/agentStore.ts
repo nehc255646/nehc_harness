@@ -245,7 +245,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
       if (thinkingCh) {
         return { ...m, thinking: (m.thinking || "") + delta, thinkingStreaming: true };
       }
-      return { ...m, content: m.content + delta };
+      return { ...m, content: m.content + delta, thinkingStreaming: false };
     };
     if (subagentId) {
       set((s) => ({
@@ -334,13 +334,18 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         args: p.args,
         messageId: typeof p.message_id === "string" ? p.message_id : undefined,
       };
+      const mid = incoming.messageId;
+      const messages =
+        mid && s.messages.some((m) => m.id === mid && m.thinkingStreaming)
+          ? s.messages.map((m) => (m.id === mid ? { ...m, thinkingStreaming: false } : m))
+          : s.messages;
       const idx = s.toolCalls.findIndex((t) => t.call_id === incoming.call_id);
       if (idx >= 0) {
         const copy = s.toolCalls.slice();
         copy[idx] = { ...copy[idx], ...incoming, args: incoming.args ?? copy[idx].args };
-        return { toolCalls: copy };
+        return { toolCalls: copy, messages };
       }
-      return { toolCalls: [...s.toolCalls, incoming] };
+      return { toolCalls: [...s.toolCalls, incoming], messages };
     });
   });
   wsClient.on("tool.result", (p) => {

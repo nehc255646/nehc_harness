@@ -7,12 +7,7 @@ import ToolCallCard from "./ToolCallCard";
 
 const EXAMPLES_AUTO = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello harness"];
 const EXAMPLES_PLAN = ["阅读工作区结构", "说明当前代码如何启动", "给出下一步实现计划"];
-
-function roleLabel(role: string) {
-  if (role === "user") return "你";
-  if (role === "assistant") return "Harness";
-  return role;
-}
+const COL = "mx-auto w-full max-w-6xl px-4 sm:px-6";
 
 export default function Chat() {
   const {
@@ -140,46 +135,51 @@ export default function Chat() {
             )}
           </div>
         ) : (
-          <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
+          <div className={`${COL} space-y-3 py-5`}>
             {(() => {
               const used = new Set<string>();
               const blocks: ReactNode[] = [];
               for (const m of messages) {
                 const isUser = m.role === "user";
+                const hasContent = Boolean(m.content && m.content.trim());
                 const showBubble =
                   isUser ||
                   Boolean(m.streaming) ||
-                  Boolean(m.content && m.content.trim()) ||
+                  hasContent ||
                   Boolean(m.thinking) ||
                   Boolean(m.thinkingStreaming);
                 const attached = toolCalls.filter((t) => t.name !== "finish_task" && t.messageId === m.id);
                 attached.forEach((t) => used.add(t.call_id));
                 if (showBubble) {
                   const isError = !isUser && m.content.startsWith("[错误]");
+                  const caret = m.streaming && !m.thinkingStreaming && (
+                    <span className="ml-0.5 animate-pulse text-accent">▍</span>
+                  );
                   blocks.push(
                     <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                      <div
-                        className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-6 ${
-                          isUser
-                            ? "bg-accent-dim text-[var(--color-text)]"
-                            : isError
-                              ? "border border-red-500/30 bg-red-950/30 text-red-200"
-                              : "border border-[var(--color-border)] bg-surface"
-                        }`}
-                      >
-                        <div className={`mb-1 text-[10px] font-medium uppercase tracking-wider ${isUser ? "text-accent" : "text-faint"}`}>
-                          {roleLabel(m.role)}
+                      {isUser ? (
+                        <div className="max-w-[min(75%,42rem)] rounded-2xl bg-accent-dim px-4 py-2.5 text-sm leading-6">
+                          <p className="whitespace-pre-wrap">{m.content}</p>
                         </div>
-                        {!isUser && (
+                      ) : (
+                        <div className="w-full min-w-0 text-sm leading-6">
                           <ThinkingBlock text={m.thinking} streaming={m.thinkingStreaming} />
-                        )}
-                        <p className="whitespace-pre-wrap">
-                          {m.content}
-                          {m.streaming && !m.thinkingStreaming && (
-                            <span className="ml-0.5 animate-pulse text-accent">▍</span>
+                          {hasContent ? (
+                            <p
+                              className={`whitespace-pre-wrap ${
+                                isError
+                                  ? "rounded-xl border border-red-500/30 bg-red-950/30 px-3 py-2 text-red-200"
+                                  : ""
+                              }`}
+                            >
+                              {m.content}
+                              {caret}
+                            </p>
+                          ) : (
+                            caret
                           )}
-                        </p>
-                      </div>
+                        </div>
+                      )}
                     </div>,
                   );
                 }
@@ -201,8 +201,8 @@ export default function Chat() {
         )}
       </div>
 
-      <div className="border-t border-[var(--color-border)] bg-surface/60 px-4 py-3 backdrop-blur">
-        <div className="mx-auto w-full max-w-3xl">
+      <div className="border-t border-[var(--color-border)] bg-surface/60 py-3 backdrop-blur">
+        <div className={COL}>
           {pendingApprovals[0] && (
             <ApprovalModal key={pendingApprovals[0].approval_id} approval={pendingApprovals[0]} onRespond={respondApproval} />
           )}
