@@ -1,6 +1,7 @@
 /** 交互型子 agent 侧栏 — 用户从顶栏呼出；关闭仅收起 UI，不终止 */
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "../../store/agentStore";
+import ThinkingBlock from "../ThinkingBlock";
 import { IconChevron, IconClose, IconSend } from "../icons";
 
 export default function SubAgentPanel({
@@ -92,8 +93,13 @@ export default function SubAgentPanel({
                   className={`rounded-lg px-2 py-1 text-xs ${m.role === "user" ? "bg-surface text-zinc-200" : "bg-accent-dim text-accent"}`}
                 >
                   <span className="mr-1 text-[10px] text-faint">{m.role === "user" ? "我" : "子"}</span>
+                  {m.role !== "user" && (
+                    <ThinkingBlock text={m.thinking} streaming={m.thinkingStreaming} />
+                  )}
                   <span className="whitespace-pre-wrap">{m.content}</span>
-                  {m.streaming && <span className="ml-0.5 animate-pulse text-accent">▍</span>}
+                  {m.streaming && !m.thinkingStreaming && (
+                    <span className="ml-0.5 animate-pulse text-accent">▍</span>
+                  )}
                 </div>
               ))}
               <div ref={bottomRef} />

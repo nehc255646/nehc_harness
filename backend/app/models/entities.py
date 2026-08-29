@@ -49,6 +49,8 @@ class Model(Base):
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     context_window: Mapped[int] = mapped_column(Integer, nullable=False, default=128000)
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.2)
+    request_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    reasoning_effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, server_default=func.now())
 
     provider: Mapped[Provider] = relationship(back_populates="models")

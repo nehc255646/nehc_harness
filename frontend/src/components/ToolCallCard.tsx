@@ -43,7 +43,7 @@ export default function ToolCallCard({ tool }: { tool: ToolCallView }) {
   const running = tool.result === undefined;
   const text = resultText(tool.result);
   const isErr = !running && /\[错误\]|\[拒绝\]|\[超时\]|\[异常\]/.test(text);
-  const [open, setOpen] = useState(() => running || isErr);
+  const [open, setOpen] = useState(false);
   const diff = tool.diff;
   const summary = summarize(tool.name, tool.args);
   const fileLike = tool.name === "write" || tool.name === "edit" || tool.name === "read";

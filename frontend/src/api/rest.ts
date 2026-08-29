@@ -29,6 +29,8 @@ export type ModelRow = {
   display_name: string;
   context_window: number;
   temperature: number;
+  request_thinking?: boolean;
+  reasoning_effort?: string | null;
 };
 
 export type ProviderRow = {
@@ -47,7 +49,7 @@ export type HistoryMessage = {
   id: number;
   public_id: string;
   role: string;
-  content: { text?: string; tool_calls?: unknown } | string;
+  content: { text?: string; thinking?: string; tool_calls?: unknown } | string;
   tool_call_id?: string | null;
 };
 
@@ -145,7 +147,17 @@ export const rest = {
     }).then(json) as Promise<LlmProbeResult>,
   testModel: (id: number) =>
     fetch(`/api/models/${id}/test`, { method: "POST" }).then(json) as Promise<LlmProbeResult>,
-  createModel: (providerId: number, body: { model_id: string; display_name: string; context_window?: number; temperature?: number }) =>
+  createModel: (
+    providerId: number,
+    body: {
+      model_id: string;
+      display_name: string;
+      context_window?: number;
+      temperature?: number;
+      request_thinking?: boolean;
+      reasoning_effort?: string | null;
+    },
+  ) =>
     fetch(`/api/providers/${providerId}/models`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -153,7 +165,14 @@ export const rest = {
     }).then(json) as Promise<ModelRow>,
   patchModel: (
     id: number,
-    body: Partial<{ model_id: string; display_name: string; context_window: number; temperature: number }>,
+    body: Partial<{
+      model_id: string;
+      display_name: string;
+      context_window: number;
+      temperature: number;
+      request_thinking: boolean;
+      reasoning_effort: string | null;
+    }>,
   ) =>
     fetch(`/api/models/${id}`, {
       method: "PATCH",
@@ -173,22 +192,29 @@ export const rest = {
   deleteModel: (id: number) => fetch(`/api/models/${id}`, { method: "DELETE" }).then(json),
 };
 
-export function historyToChat(rows: HistoryMessage[]): { id: string; role: string; content: string }[] {
+export type ChatMessage = {
+  id: string;
+  role: string;
+  content: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  streaming?: boolean;
+};
+
+export function historyToChat(rows: HistoryMessage[]): ChatMessage[] {
   return rows
     .filter((r) => r.role === "user" || r.role === "assistant")
     .map((r) => {
       const text = typeof r.content === "string" ? r.content : r.content?.text || "";
-      return { id: r.public_id, role: r.role, content: text };
+      const thinking = typeof r.content === "string" ? "" : r.content?.thinking || "";
+      return { id: r.public_id, role: r.role, content: text, thinking };
     });
 }
 
-export function mergeChatMessages(
-  fromRest: { id: string; role: string; content: string }[],
-  live: { id: string; role: string; content: string; streaming?: boolean }[],
-): { id: string; role: string; content: string; streaming?: boolean }[] {
+export function mergeChatMessages(fromRest: ChatMessage[], live: ChatMessage[]): ChatMessage[] {
   const restIds = new Set(fromRest.map((m) => m.id));
   const liveById = new Map(live.map((m) => [m.id, m]));
-  const merged: { id: string; role: string; content: string; streaming?: boolean }[] = fromRest.map((m) => {
+  const merged: ChatMessage[] = fromRest.map((m) => {
     const cur = liveById.get(m.id);
     if (!cur) return m;
     return {
@@ -196,6 +222,8 @@ export function mergeChatMessages(
       role: cur.role || m.role,
       // 进行中半条保留 live；已完成以 REST 历史为准（断线期间可能已 message.done）
       content: cur.streaming ? cur.content || m.content : m.content || cur.content,
+      thinking: cur.streaming ? cur.thinking || m.thinking : m.thinking || cur.thinking,
+      thinkingStreaming: cur.streaming ? cur.thinkingStreaming : false,
       streaming: cur.streaming,
     };
   });

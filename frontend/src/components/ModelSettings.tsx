@@ -7,6 +7,8 @@ type DraftModel = {
   id?: number;
   model_id: string;
   display_name: string;
+  request_thinking: boolean;
+  reasoning_effort: string;
   testStatus: "idle" | "testing" | "ok" | "fail";
   testMessage: string;
 };
@@ -57,6 +59,8 @@ function fromSaved(p: ProviderRow, models: ModelRow[]): Draft {
         id: m.id,
         model_id: m.model_id,
         display_name: m.display_name,
+        request_thinking: Boolean(m.request_thinking),
+        reasoning_effort: m.reasoning_effort || "",
         testStatus: "idle",
         testMessage: "",
       })),
@@ -74,7 +78,13 @@ function snapshot(d: Draft) {
     api_key: d.api_key_dirty ? d.api_key : "",
     api_key_from_env: d.api_key_from_env,
     api_key_env: d.api_key_env,
-    models: d.models.map((m) => ({ id: m.id, model_id: m.model_id, display_name: m.display_name })),
+    models: d.models.map((m) => ({
+      id: m.id,
+      model_id: m.model_id,
+      display_name: m.display_name,
+      request_thinking: m.request_thinking,
+      reasoning_effort: m.reasoning_effort,
+    })),
     removedIds: d.removedIds,
   });
 }
@@ -243,6 +253,8 @@ export default function ModelSettings({
         const payload = {
           model_id: row.model_id.trim(),
           display_name: row.display_name.trim() || row.model_id.trim(),
+          request_thinking: row.request_thinking,
+          reasoning_effort: row.request_thinking ? row.reasoning_effort.trim() || null : null,
         };
         if (row.id) {
           await rest.patchModel(row.id, payload);
@@ -475,6 +487,37 @@ export default function ModelSettings({
                         })
                       }
                     />
+                    <label className="flex shrink-0 items-center gap-1 text-[11px] text-muted">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 rounded border-[var(--color-border-strong)] bg-surface-2 accent-[var(--color-accent)]"
+                        checked={row.request_thinking}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            models: draft.models.map((m) =>
+                              m.key === row.key ? { ...m, request_thinking: e.target.checked } : m,
+                            ),
+                          })
+                        }
+                      />
+                      请求思考
+                    </label>
+                    {row.request_thinking && (
+                      <input
+                        className="ui-input w-24 text-xs"
+                        placeholder="effort"
+                        value={row.reasoning_effort}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            models: draft.models.map((m) =>
+                              m.key === row.key ? { ...m, reasoning_effort: e.target.value } : m,
+                            ),
+                          })
+                        }
+                      />
+                    )}
                     <div className="flex shrink-0 gap-2">
                     <button
                       className="ui-btn-ghost flex-1 px-3 text-xs sm:flex-none"
@@ -517,6 +560,8 @@ export default function ModelSettings({
                       key: `new-${Date.now()}`,
                       model_id: "",
                       display_name: "",
+                      request_thinking: false,
+                      reasoning_effort: "",
                       testStatus: "idle",
                       testMessage: "",
                     },

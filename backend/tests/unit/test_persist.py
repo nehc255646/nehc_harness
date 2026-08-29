@@ -73,6 +73,27 @@ async def test_save_and_load_history(db_ready):
     assert summary is None
 
 
+async def test_thinking_persisted_but_not_in_loop_history(db_ready):
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="think")
+    await save_message(
+        session_id=sid,
+        agent_id="main",
+        role="assistant",
+        content="答案",
+        thinking="我先想一步",
+    )
+    hist, _, _ = await load_history(sid)
+    assert hist[-1]["content"] == "答案"
+    assert "thinking" not in hist[-1]
+    from app.persist import list_messages
+
+    rows = await list_messages(sid)
+    raw = rows[-1].content
+    assert raw["text"] == "答案"
+    assert raw["thinking"] == "我先想一步"
+
+
 async def test_tool_log_and_assistant_tool_calls(db_ready):
     sid = f"ut_{uuid.uuid4().hex[:12]}"
     await ensure_session(sid, title="tools")

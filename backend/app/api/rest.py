@@ -115,6 +115,8 @@ def _model_out(m: Model) -> ModelOut:
         display_name=m.display_name,
         context_window=m.context_window,
         temperature=m.temperature,
+        request_thinking=bool(getattr(m, "request_thinking", False)),
+        reasoning_effort=getattr(m, "reasoning_effort", None),
         created_at=m.created_at,
     )
 
@@ -525,6 +527,8 @@ async def api_create_model(provider_id: int, body: ModelCreate):
             display_name=body.display_name,
             context_window=body.context_window,
             temperature=body.temperature,
+            request_thinking=body.request_thinking,
+            reasoning_effort=(body.reasoning_effort or "").strip() or None,
         )
         db.add(m)
         await db.flush()
@@ -589,6 +593,10 @@ async def api_patch_model(model_id: int, body: ModelUpdate):
             m.context_window = body.context_window
         if body.temperature is not None:
             m.temperature = body.temperature
+        if body.request_thinking is not None:
+            m.request_thinking = body.request_thinking
+        if body.reasoning_effort is not None:
+            m.reasoning_effort = body.reasoning_effort.strip() or None
         await db.flush()
         return _model_out(m)
 

@@ -83,6 +83,8 @@ class ModelCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=128)
     context_window: int = Field(default=128000, ge=1024)
     temperature: float = Field(default=0.2, ge=0, le=2)
+    request_thinking: bool = False
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class ModelUpdate(BaseModel):
@@ -90,6 +92,8 @@ class ModelUpdate(BaseModel):
     display_name: str | None = None
     context_window: int | None = Field(default=None, ge=1024)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    request_thinking: bool | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class ModelOut(BaseModel):
@@ -101,6 +105,8 @@ class ModelOut(BaseModel):
     display_name: str
     context_window: int
     temperature: float
+    request_thinking: bool = False
+    reasoning_effort: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

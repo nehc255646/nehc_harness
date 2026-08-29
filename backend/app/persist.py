@@ -219,6 +219,7 @@ def message_row_to_history(row: Message) -> dict[str, Any]:
         item["tool_call_id"] = row.tool_call_id
     if isinstance(raw, dict) and raw.get("name"):
         item["name"] = raw["name"]
+    # thinking 仅给 UI/REST，不进 loop 上下文
     return item
 
 
@@ -232,6 +233,7 @@ async def save_message(
     tool_call_id: str | None = None,
     tool_calls: list | None = None,
     name: str | None = None,
+    thinking: str | None = None,
     enqueue_on_fail: bool = True,
 ) -> str | None:
     """message.done / 用户消息落库。返回 public_id。失败入待写队列。"""
@@ -244,6 +246,8 @@ async def save_message(
         payload_content["tool_calls"] = tool_calls
     if name:
         payload_content["name"] = name
+    if thinking:
+        payload_content["thinking"] = thinking
     payload = {
         "session_id": session_id,
         "agent_id": agent_id,

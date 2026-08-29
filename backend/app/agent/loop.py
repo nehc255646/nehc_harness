@@ -23,6 +23,7 @@ from app.agent.context import (
 )
 from app.agent.executor import Executor
 from app.agent.prompts import PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT
+from app.agent.stream import ThinkTagSplitter, iter_channels
 from app.core import rtstore
 from app.core.config import settings
 from app.core.errors import ErrorCode
@@ -293,6 +294,7 @@ class AgentLoop:
                 tool_calls = result.get("tool_calls") or []
                 text = result.get("text") or ""
                 already_streamed = result.get("streamed", False)
+                thinking = result.get("thinking") or ""
 
                 # 4. 纯文本分支：流式过的仅补 history，未流式的推送并记录
                 if not tool_calls:
@@ -303,7 +305,9 @@ class AgentLoop:
                     elif already_streamed:
                         # 真实模型流式已推送，补 history 供下一轮上下文
                         self.history.append({"role": "assistant", "content": text})
-                        await self._persist_message("assistant", text, public_id=self._current_message_id)
+                        await self._persist_message(
+                            "assistant", text, public_id=self._current_message_id, thinking=thinking
+                        )
                     else:
                         await self._emit_message(text, done=True)
                     # 进入 idle，等待下一事件
@@ -324,6 +328,7 @@ class AgentLoop:
                     text or "",
                     public_id=self._current_message_id,
                     tool_calls=tool_calls,
+                    thinking=thinking,
                 )
                 tool_results = await self._dispatch_tools(tool_calls)
                 # 原子回填历史 (assistant tool_calls + tool results)
@@ -441,6 +446,7 @@ class AgentLoop:
         tool_call_id: str | None = None,
         tool_calls: list | None = None,
         name: str | None = None,
+        thinking: str | None = None,
     ):
         try:
             await persist_mod.save_message(
@@ -452,6 +458,7 @@ class AgentLoop:
                 tool_call_id=tool_call_id,
                 tool_calls=tool_calls,
                 name=name,
+                thinking=thinking,
             )
         except Exception:
             logger.debug("persist message failed", exc_info=True)
@@ -568,21 +575,59 @@ class AgentLoop:
         await self._broadcast("message.start", {"agent_id": self.agent_id, "message_id": message_id, "role": "assistant"})
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
 
         try:
-            async for chunk in self.executor.astream_with_retry(messages, self._bound_tools()):
-                # chunk 可能是 AIMessageChunk
-                delta = getattr(chunk, "content", "") or ""
+            async for thinking, delta, tcs in iter_channels(self.executor, messages, self._bound_tools()):
+                if thinking:
+                    thinking_parts.append(thinking)
+                    await self._broadcast(
+                        "message.delta",
+                        {
+                            "agent_id": self.agent_id,
+                            "message_id": message_id,
+                            "delta": thinking,
+                            "channel": "thinking",
+                        },
+                    )
                 if delta:
                     text_parts.append(delta)
-                    await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": delta})
-                accumulate_tool_calls(tool_calls_acc, chunk)
+                    await self._broadcast(
+                        "message.delta",
+                        {"agent_id": self.agent_id, "message_id": message_id, "delta": delta},
+                    )
+                if tcs:
+                    accumulate_tool_calls(tool_calls_acc, {"tool_call_chunks": tcs})
         except Exception as e:
             # 若流式失败，尝试非流式
             logger.warning("Stream failed, fallback to ainvoke: %s", e)
             result = await self.executor.ainvoke(messages, self._bound_tools())
-            text = getattr(result, "content", "") or ""
+            raw = getattr(result, "content", "") or ""
+            extra = getattr(result, "additional_kwargs", None) or {}
+            think_raw = ""
+            if isinstance(extra, dict):
+                think_raw = extra.get("reasoning_content") or extra.get("reasoning") or ""
+                if not isinstance(think_raw, str):
+                    think_raw = ""
+            splitter = ThinkTagSplitter()
+            tag_th, tag_ct = splitter.feed(raw if isinstance(raw, str) else "")
+            th_f, ct_f = splitter.flush()
+            think_all = think_raw + tag_th + th_f
+            text = tag_ct + ct_f
+            if not text and isinstance(raw, str) and not tag_th:
+                text = raw
+            if think_all:
+                thinking_parts = [think_all]
+                await self._broadcast(
+                    "message.delta",
+                    {
+                        "agent_id": self.agent_id,
+                        "message_id": message_id,
+                        "delta": think_all,
+                        "channel": "thinking",
+                    },
+                )
             if text:
                 text_parts = [text]
                 await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": text})
@@ -597,11 +642,15 @@ class AgentLoop:
                 }
 
         full_text = "".join(text_parts)
-        await self._broadcast("message.done", {"message_id": message_id, "role": "assistant", "content": full_text})
+        full_thinking = "".join(thinking_parts)
+        await self._broadcast(
+            "message.done",
+            {"message_id": message_id, "role": "assistant", "content": full_text, "thinking": full_thinking},
+        )
 
         # history 追加占位 (仅文本部分，tool_calls 后续统一回填) — 不在此落库，避免重复
         tool_calls = parse_tool_calls(tool_calls_acc)
-        return {"text": full_text, "tool_calls": tool_calls, "streamed": True}
+        return {"text": full_text, "tool_calls": tool_calls, "streamed": True, "thinking": full_thinking}
 
     def _heuristic_fallback(self, messages: list[dict]) -> dict:
         """无 LLM 时的启发式 fallback，保证 M1 演示可用 — 仅对最新 user 消息生成一次工具调用"""

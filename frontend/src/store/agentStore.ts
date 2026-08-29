@@ -12,7 +12,14 @@ import {
 } from "../api/rest";
 import { wsClient } from "../api/ws";
 
-type Message = { id: string; role: string; content: string; streaming?: boolean };
+type Message = {
+  id: string;
+  role: string;
+  content: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  streaming?: boolean;
+};
 type ToolCall = {
   call_id: string;
   name: string;
@@ -23,7 +30,14 @@ type ToolCall = {
   messageId?: string;
 };
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
-type SubPanelMessage = { id: string; role: string; content: string; streaming?: boolean };
+type SubPanelMessage = {
+  id: string;
+  role: string;
+  content: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  streaming?: boolean;
+};
 type SubPanel = {
   subagent_id: string;
   kind: string;
@@ -196,50 +210,86 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
       set((s) => ({
         subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => [
           ...msgs,
-          { id, role: p.role as string, content: "", streaming: true },
+          { id, role: p.role as string, content: "", thinking: "", streaming: true },
         ]),
       }));
       return;
     }
-    set((s) => ({ messages: [...s.messages, { id, role: p.role as string, content: "", streaming: true }] }));
+    set((s) => ({
+      messages: [...s.messages, { id, role: p.role as string, content: "", thinking: "", streaming: true }],
+    }));
   });
 
   wsClient.on("message.delta", (p) => {
     const id = p.message_id as string;
-    const delta = p.delta as string;
+    const delta = (p.delta as string) || "";
+    const thinkingCh = p.channel === "thinking";
     const subagentId = subMessageOwner.get(id);
+    const patchMsg = <T extends { id: string; content: string; thinking?: string; thinkingStreaming?: boolean }>(
+      m: T,
+    ): T => {
+      if (m.id !== id) return m;
+      if (thinkingCh) {
+        return { ...m, thinking: (m.thinking || "") + delta, thinkingStreaming: true };
+      }
+      return { ...m, content: m.content + delta };
+    };
     if (subagentId) {
       set((s) => ({
-        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) =>
-          msgs.map((m) => (m.id === id ? { ...m, content: m.content + delta } : m)),
-        ),
+        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => msgs.map(patchMsg)),
       }));
       return;
     }
     set((s) => ({
-      messages: s.messages.map((m) => (m.id === id ? { ...m, content: m.content + delta } : m)),
+      messages: s.messages.map(patchMsg),
     }));
   });
 
   wsClient.on("message.done", (p) => {
     const id = p.message_id as string;
+    const thinking = typeof p.thinking === "string" ? p.thinking : undefined;
     const subagentId = subMessageOwner.get(id);
     subMessageOwner.delete(id);
     if (subagentId) {
       set((s) => ({
         subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) =>
-          msgs.map((m) => (m.id === id ? { ...m, content: p.content as string, streaming: false } : m)),
+          msgs.map((m) =>
+            m.id === id
+              ? {
+                  ...m,
+                  content: p.content as string,
+                  thinking: thinking ?? m.thinking,
+                  thinkingStreaming: false,
+                  streaming: false,
+                }
+              : m,
+          ),
         ),
       }));
       return;
     }
     set((s) => ({
-      messages: s.messages.map((m) => (m.id === id ? { ...m, content: p.content as string, streaming: false } : m)),
+      messages: s.messages.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              content: p.content as string,
+              thinking: thinking ?? m.thinking,
+              thinkingStreaming: false,
+              streaming: false,
+            }
+          : m,
+      ),
     }));
     // 若 message.done 没有对应 start，直接追加
     const exists = get().messages.some((m) => m.id === id);
     if (!exists) {
-      set((s) => ({ messages: [...s.messages, { id, role: p.role as string, content: p.content as string }] }));
+      set((s) => ({
+        messages: [
+          ...s.messages,
+          { id, role: p.role as string, content: p.content as string, thinking: thinking || "" },
+        ],
+      }));
     }
   });
 

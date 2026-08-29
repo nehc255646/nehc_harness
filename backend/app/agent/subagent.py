@@ -19,6 +19,7 @@ from app.agent.context import (
 )
 from app.agent.executor import Executor
 from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
+from app.agent.stream import iter_channels
 from app.core.config import settings
 from app.permissions.gate import gate
 from app.permissions.policy import check_policy
@@ -427,10 +428,23 @@ class SubAgentLoop:
         )
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
-        # 用 astream_with_retry
-        async for chunk in self.executor.astream_with_retry(messages, tool_set):
-            delta = getattr(chunk, "content", "") or ""
+        async for thinking, delta, tcs in iter_channels(self.executor, messages, tool_set):
+            if thinking:
+                thinking_parts.append(thinking)
+                await _broadcast(
+                    self.session_id,
+                    "message.delta",
+                    {
+                        "agent_id": self.subagent_id,
+                        "message_id": message_id,
+                        "delta": thinking,
+                        "channel": "thinking",
+                        "subagent_id": self.subagent_id,
+                    },
+                    self.broadcaster,
+                )
             if delta:
                 text_parts.append(delta)
                 await _broadcast(
@@ -439,17 +453,25 @@ class SubAgentLoop:
                     {"agent_id": self.subagent_id, "message_id": message_id, "delta": delta, "subagent_id": self.subagent_id},
                     self.broadcaster,
                 )
-            accumulate_tool_calls(tool_calls_acc, chunk)
+            if tcs:
+                accumulate_tool_calls(tool_calls_acc, {"tool_call_chunks": tcs})
 
         full_text = "".join(text_parts)
+        full_thinking = "".join(thinking_parts)
         await _broadcast(
             self.session_id,
             "message.done",
-            {"message_id": message_id, "role": "assistant", "content": full_text, "subagent_id": self.subagent_id},
+            {
+                "message_id": message_id,
+                "role": "assistant",
+                "content": full_text,
+                "thinking": full_thinking,
+                "subagent_id": self.subagent_id,
+            },
             self.broadcaster,
         )
         tool_calls = parse_tool_calls(tool_calls_acc)
-        return {"text": full_text, "tool_calls": tool_calls, "streamed": True}
+        return {"text": full_text, "tool_calls": tool_calls, "streamed": True, "thinking": full_thinking}
 
     def _heuristic_fallback(self, messages: list[dict]) -> dict:
         # 无 key 时的演示 fallback

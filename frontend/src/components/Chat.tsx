@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAgentStore } from "../store/agentStore";
 import ApprovalModal from "./ApprovalModal";
 import { IconSend } from "./icons";
+import ThinkingBlock from "./ThinkingBlock";
 import ToolCallCard from "./ToolCallCard";
 
 const EXAMPLES_AUTO = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello harness"];
@@ -145,7 +146,12 @@ export default function Chat() {
               const blocks: ReactNode[] = [];
               for (const m of messages) {
                 const isUser = m.role === "user";
-                const showBubble = isUser || Boolean(m.streaming) || Boolean(m.content && m.content.trim());
+                const showBubble =
+                  isUser ||
+                  Boolean(m.streaming) ||
+                  Boolean(m.content && m.content.trim()) ||
+                  Boolean(m.thinking) ||
+                  Boolean(m.thinkingStreaming);
                 const attached = toolCalls.filter((t) => t.name !== "finish_task" && t.messageId === m.id);
                 attached.forEach((t) => used.add(t.call_id));
                 if (showBubble) {
@@ -164,9 +170,14 @@ export default function Chat() {
                         <div className={`mb-1 text-[10px] font-medium uppercase tracking-wider ${isUser ? "text-accent" : "text-faint"}`}>
                           {roleLabel(m.role)}
                         </div>
+                        {!isUser && (
+                          <ThinkingBlock text={m.thinking} streaming={m.thinkingStreaming} />
+                        )}
                         <p className="whitespace-pre-wrap">
                           {m.content}
-                          {m.streaming && <span className="ml-0.5 animate-pulse text-accent">▍</span>}
+                          {m.streaming && !m.thinkingStreaming && (
+                            <span className="ml-0.5 animate-pulse text-accent">▍</span>
+                          )}
                         </p>
                       </div>
                     </div>,
