@@ -124,12 +124,14 @@ class ApprovalGate:
         # 会话放行规则写入 (approve_similar)
         if decision == "approve_similar":
             if pending.tool == "shell":
-                # 取前 2 token 前缀
-                cmd = pending.args.get("command", "") or pending.args.get("cmd", "")
-                tokens = cmd.strip().split()
-                prefix = " ".join(tokens[:2]) if tokens else cmd
-                self.add_session_rule(pending.session_id, {"kind": "shell_prefix", "pattern": prefix})
-            else:
+                # 取前 2 token 前缀；空命令不写入，避免放行一切
+                args = pending.args if isinstance(pending.args, dict) else {}
+                cmd = str(args.get("command") or args.get("cmd") or "").strip()
+                tokens = cmd.split()
+                prefix = " ".join(tokens[:2])
+                if prefix:
+                    self.add_session_rule(pending.session_id, {"kind": "shell_prefix", "pattern": prefix})
+            elif pending.tool:
                 self.add_session_rule(pending.session_id, {"kind": "tool", "pattern": pending.tool})
 
         # Future 结果: (approved: bool, decision: str, reason: str)

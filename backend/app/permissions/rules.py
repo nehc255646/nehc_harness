@@ -165,9 +165,13 @@ def is_session_shell_allowed(command: str, session_rules: list[dict]) -> bool:
     for rule in session_rules:
         if rule.get("kind") != "shell_prefix":
             continue
-        pat = rule.get("pattern", "")
+        pat = (rule.get("pattern") or "").strip()
+        if not pat:
+            continue
         for sub in _split_shell_commands(command):
             sub = sub.strip()
+            if not sub:
+                continue
             if sub == pat or sub.startswith(pat + " "):
                 return True
     return False

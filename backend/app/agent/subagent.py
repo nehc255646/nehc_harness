@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from app.agent.context import (
     accumulate_tool_calls,
     build_messages,
+    normalize_tool_args,
     parse_tool_calls,
+    shell_command,
     truncate_tool_result,
     window_slice,
 )
@@ -486,8 +488,13 @@ class SubAgentLoop:
         async def _run_one(tc: dict) -> dict:
             call_id = tc.get("id") or ""
             name = tc.get("name") or ""
-            args = tc.get("args") or {}
+            args = normalize_tool_args(tc.get("args") or {})
+            tc["args"] = args
             try:
+                if name == "shell" and not shell_command(args):
+                    result = "[错误] shell 命令为空或参数解析失败"
+                    await self._persist_worker_log(name, args, result, call_id, True, "blocked", "empty_command")
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 # finish_worker 已在外层 _run_loop 拦截收敛，不进入分发
                 if name in ("spawn_worker", "spawn_workers", "spawn_subagent"):
                     return {"call_id": call_id, "name": name, "result": "[拒绝] 工作型不支持递归派生", "is_error": True}
@@ -521,21 +528,20 @@ class SubAgentLoop:
                 logger.exception("Worker tool dispatch error")
                 return {"call_id": call_id, "name": name, "result": f"[异常] {e}", "is_error": True}
 
-        # 并行 gather；异常合成错误结果而非丢弃，保证 tool_calls/tool 配对
-        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
         out: list[dict] = []
-        for tc, r in zip(tool_calls, results):
-            if isinstance(r, BaseException):
+        for tc in tool_calls:
+            try:
+                out.append(await _run_one(tc))
+            except Exception as e:
+                logger.exception("Worker tool dispatch error")
                 out.append(
                     {
                         "call_id": tc.get("id") or "",
                         "name": tc.get("name") or "",
-                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {r}",
+                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {e}",
                         "is_error": True,
                     }
                 )
-            else:
-                out.append(r)
         return out
 
     async def _persist_worker_log(
@@ -573,9 +579,9 @@ class SubAgentLoop:
         diff = None
         try:
             if name == "shell":
-                command = args.get("command") or args.get("cmd") or ""
+                command = shell_command(args)
                 # 空/不可解析参数（如 __raw 兜底）不执行，防止空命令静默成功
-                if not str(command).strip():
+                if not command:
                     result = "[错误] shell 命令为空或参数解析失败"
                     await _broadcast(self.session_id, "tool.result", {"call_id": call_id, "result": result, "is_error": True, "subagent_id": self.subagent_id}, self.broadcaster)
                     await self._persist_worker_log(name, args, result, call_id, True, decision, reason or None)

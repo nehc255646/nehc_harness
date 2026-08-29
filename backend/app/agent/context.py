@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import uuid
 
 logger = logging.getLogger("harness.context")
@@ -107,14 +108,64 @@ def new_tool_call_acc(index: int) -> dict:
     return {"name": "", "args": "", "id": "", "index": index}
 
 
+def _as_index(value) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _index_for_tool_call(tc, acc: dict[int, dict]) -> int:
+    """优先用供应商给的 index；否则按 id 归并；禁止把缺 index 的完整块再开一槽。"""
+    idx = _as_index(tc_field(tc, "index"))
+    if idx is not None:
+        return idx
+    tid = tc_field(tc, "id")
+    if tid:
+        for k, v in acc.items():
+            if v.get("id") == tid:
+                return k
+    if len(acc) == 1:
+        only_k = next(iter(acc.keys()))
+        only_id = acc[only_k].get("id") or ""
+        if not tid or not only_id or only_id == tid:
+            return only_k
+    return max(acc.keys(), default=-1) + 1
+
+
+def _merge_tool_args(entry: dict, args) -> None:
+    """碎片拼接与已解析 dict 合并；空值不覆盖已累积内容。"""
+    if args is None or args == "" or args == {}:
+        return
+    cur = entry.get("args")
+    if isinstance(args, dict):
+        if isinstance(cur, dict) and cur:
+            cur.update(args)
+        else:
+            entry["args"] = dict(args)
+        return
+    if isinstance(args, str):
+        if isinstance(cur, dict) and cur:
+            return
+        if isinstance(cur, str):
+            entry["args"] = cur + args
+        else:
+            entry["args"] = args
+
+
 def accumulate_tool_calls(acc: dict[int, dict], chunk) -> None:
     """从流式 chunk 累积 tool_calls。
 
-    args 兼容两种形态：字符串碎片逐段拼接；已解析 dict（部分供应商/完整块）整体覆盖。
+    args 兼容两种形态：字符串碎片逐段拼接；已解析 dict（部分供应商/完整块）合并进同一 index。
     """
-    chunks = tc_field(chunk, "tool_call_chunks") or tc_field(chunk, "tool_calls") or []
-    for tc in chunks:
-        idx = tc_field(tc, "index") or 0
+    fragments = tc_field(chunk, "tool_call_chunks")
+    if not isinstance(fragments, list):
+        fragments = []
+    for tc in fragments:
+        idx = _index_for_tool_call(tc, acc)
         if idx not in acc:
             acc[idx] = new_tool_call_acc(idx)
         entry = acc[idx]
@@ -124,26 +175,80 @@ def accumulate_tool_calls(acc: dict[int, dict], chunk) -> None:
         tid = tc_field(tc, "id")
         if tid:
             entry["id"] = tid
-        args = tc_field(tc, "args")
-        if args:
-            if isinstance(args, str):
-                entry["args"] += args
-            else:
-                entry["args"] = args
+        _merge_tool_args(entry, tc_field(tc, "args"))
 
-    # 完整 tool_calls（已解析 dict）整体覆盖，保证最终态正确
     complete = tc_field(chunk, "tool_calls")
-    if isinstance(complete, list) and complete and complete is not chunks:
-        for tc in complete:
-            idx = tc_field(tc, "index")
-            if idx is None:
-                idx = max(acc.keys(), default=-1) + 1
-            acc[idx] = {
-                "name": tc_field(tc, "name") or "",
-                "args": tc_field(tc, "args") or "",
-                "id": tc_field(tc, "id") or str(uuid.uuid4()),
-                "index": idx,
-            }
+    if not isinstance(complete, list) or not complete or complete is fragments:
+        return
+    for tc in complete:
+        idx = _index_for_tool_call(tc, acc)
+        if idx not in acc:
+            acc[idx] = new_tool_call_acc(idx)
+        entry = acc[idx]
+        name = tc_field(tc, "name")
+        if name:
+            entry["name"] = name
+        tid = tc_field(tc, "id")
+        if tid:
+            entry["id"] = tid
+        _merge_tool_args(entry, tc_field(tc, "args"))
+
+
+_CMD_IN_JSON_RE = re.compile(r'"(?:command|cmd)"\s*:\s*"((?:\\.|[^"\\])*)"', re.DOTALL)
+
+
+def normalize_tool_args(raw_args) -> dict:
+    """把流式/畸形 args 收成 dict；能认出 command 就不要落到 __raw。"""
+    if raw_args is None or raw_args == "":
+        return {}
+    if isinstance(raw_args, dict):
+        if list(raw_args.keys()) == ["__raw"]:
+            return normalize_tool_args(raw_args.get("__raw"))
+        return raw_args
+    if isinstance(raw_args, (list, tuple)):
+        parts = [str(x) for x in raw_args if x is not None and str(x).strip()]
+        return {"command": " ".join(parts)} if parts else {}
+    if not isinstance(raw_args, str):
+        return {}
+    s = raw_args.strip()
+    if not s:
+        return {}
+    cur = s
+    for _ in range(2):
+        try:
+            parsed = json.loads(cur)
+        except Exception:
+            break
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            cur = parsed.strip()
+            continue
+        break
+    m = _CMD_IN_JSON_RE.search(s)
+    if m:
+        try:
+            return {"command": json.loads(f'"{m.group(1)}"')}
+        except Exception:
+            return {"command": m.group(1)}
+    if s[0] not in "{[":
+        return {"command": s}
+    return {"__raw": raw_args}
+
+
+def shell_command(args) -> str:
+    """取出可执行的 command 字符串；没有则空串。"""
+    data = normalize_tool_args(args)
+    if not isinstance(data, dict):
+        return ""
+    cmd = data.get("command")
+    if cmd is None:
+        cmd = data.get("cmd")
+    if isinstance(cmd, (list, tuple)):
+        cmd = " ".join(str(x) for x in cmd)
+    if cmd is None:
+        return ""
+    return str(cmd).strip()
 
 
 def parse_tool_calls(acc: dict[int, dict]) -> list[dict]:
@@ -154,16 +259,7 @@ def parse_tool_calls(acc: dict[int, dict]) -> list[dict]:
         name = raw.get("name", "")
         if not name:
             continue
-        raw_args = raw.get("args", "")
-        if isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            try:
-                args = json.loads(raw_args) if raw_args else {}
-                if isinstance(args, str):
-                    args = json.loads(args)
-            except Exception:
-                args = {"__raw": raw_args}
+        args = normalize_tool_args(raw.get("args", ""))
         tool_calls.append({"name": name, "args": args, "id": raw.get("id") or str(uuid.uuid4())})
     return tool_calls
 

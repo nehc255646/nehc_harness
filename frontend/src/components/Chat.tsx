@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAgentStore } from "../store/agentStore";
 import ApprovalModal from "./ApprovalModal";
 import { IconSend } from "./icons";
@@ -140,34 +140,48 @@ export default function Chat() {
           </div>
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
-            {messages.map((m) => {
-              const isUser = m.role === "user";
-              const isError = !isUser && m.content.startsWith("[错误]");
-              return (
-                <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-6 ${
-                      isUser
-                        ? "bg-accent-dim text-[var(--color-text)]"
-                        : isError
-                          ? "border border-red-500/30 bg-red-950/30 text-red-200"
-                          : "border border-[var(--color-border)] bg-surface"
-                    }`}
-                  >
-                    <div className={`mb-1 text-[10px] font-medium uppercase tracking-wider ${isUser ? "text-accent" : "text-faint"}`}>
-                      {roleLabel(m.role)}
-                    </div>
-                    <p className="whitespace-pre-wrap">
-                      {m.content}
-                      {m.streaming && <span className="ml-0.5 animate-pulse text-accent">▍</span>}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-            {toolCalls.map((t) => (
-              <ToolCallCard key={t.call_id} tool={t} />
-            ))}
+            {(() => {
+              const used = new Set<string>();
+              const blocks: ReactNode[] = [];
+              for (const m of messages) {
+                const isUser = m.role === "user";
+                const showBubble = isUser || Boolean(m.streaming) || Boolean(m.content && m.content.trim());
+                const attached = toolCalls.filter((t) => t.name !== "finish_task" && t.messageId === m.id);
+                attached.forEach((t) => used.add(t.call_id));
+                if (showBubble) {
+                  const isError = !isUser && m.content.startsWith("[错误]");
+                  blocks.push(
+                    <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-6 ${
+                          isUser
+                            ? "bg-accent-dim text-[var(--color-text)]"
+                            : isError
+                              ? "border border-red-500/30 bg-red-950/30 text-red-200"
+                              : "border border-[var(--color-border)] bg-surface"
+                        }`}
+                      >
+                        <div className={`mb-1 text-[10px] font-medium uppercase tracking-wider ${isUser ? "text-accent" : "text-faint"}`}>
+                          {roleLabel(m.role)}
+                        </div>
+                        <p className="whitespace-pre-wrap">
+                          {m.content}
+                          {m.streaming && <span className="ml-0.5 animate-pulse text-accent">▍</span>}
+                        </p>
+                      </div>
+                    </div>,
+                  );
+                }
+                for (const t of attached) {
+                  blocks.push(<ToolCallCard key={t.call_id} tool={t} />);
+                }
+              }
+              const orphan = toolCalls.filter((t) => t.name !== "finish_task" && !used.has(t.call_id));
+              for (const t of orphan) {
+                blocks.push(<ToolCallCard key={t.call_id} tool={t} />);
+              }
+              return blocks;
+            })()}
             {agentState === "awaiting_approval" && pendingApprovals.length === 0 && (
               <p className="text-center text-xs text-amber-400">等待审批…</p>
             )}
@@ -178,9 +192,14 @@ export default function Chat() {
 
       <div className="border-t border-[var(--color-border)] bg-surface/60 px-4 py-3 backdrop-blur">
         <div className="mx-auto w-full max-w-3xl">
-          {pendingApprovals.map((a) => (
-            <ApprovalModal key={a.approval_id} approval={a} onRespond={respondApproval} />
-          ))}
+          {pendingApprovals[0] && (
+            <ApprovalModal key={pendingApprovals[0].approval_id} approval={pendingApprovals[0]} onRespond={respondApproval} />
+          )}
+          {pendingApprovals.length > 1 && (
+            <p className="mb-2 text-[11px] text-amber-400/90">
+              还有 {pendingApprovals.length - 1} 条命令排队等待审批。选「本次会话同类均执行」后，后续同类会自动放行。
+            </p>
+          )}
           {sendBlockedReason && <p className="mb-2 text-xs text-amber-400">{sendBlockedReason}</p>}
           {pickerErr && <p className="mb-2 text-xs text-red-300">{pickerErr}</p>}
           {workMode === "plan" && (

@@ -13,7 +13,9 @@ from app.agent.context import (
     build_messages,
     estimate_tokens,
     next_summary_cache,
+    normalize_tool_args,
     parse_tool_calls,
+    shell_command,
     should_summarize,
     slid_fingerprint,
     truncate_tool_result,
@@ -359,6 +361,11 @@ class AgentLoop:
                 # 大结果截断已在 dispatch 内处理
 
                 if has_finish:
+                    fin = next((tc for tc in tool_calls if tc.get("name") == "finish_task"), None)
+                    fin_args = normalize_tool_args((fin or {}).get("args") or {})
+                    fin_msg = str(fin_args.get("message") or "").strip()
+                    if fin_msg and fin_msg != (text or "").strip():
+                        await self._emit_message(fin_msg, done=True, record=True)
                     await self._set_state("done")
                     break
                 # 否则继续下一轮 (goto 2)，不进入 idle
@@ -586,7 +593,6 @@ class AgentLoop:
                     "index": idx,
                 }
 
-        # 结束消息
         full_text = "".join(text_parts)
         await self._broadcast("message.done", {"message_id": message_id, "role": "assistant", "content": full_text})
 
@@ -722,16 +728,30 @@ class AgentLoop:
             await self._persist_message("assistant", content, public_id=message_id)
 
     async def _dispatch_tools(self, tool_calls: list[dict]) -> list[dict]:
-        """并行分发工具，经 policy 判定，审批走 Future，全部就绪后返回（M2 支持 spawn_*）"""
+        """按序分发工具，经 policy 判定，审批走 Future（同类放行可作用于本轮后续调用）"""
 
         async def _run_one(tc: dict) -> dict:
             call_id = tc.get("id") or ""
             name = tc.get("name") or ""
-            args = tc.get("args") or {}
+            args = normalize_tool_args(tc.get("args") or {})
+            tc["args"] = args
             try:
+                if name == "shell" and not shell_command(args):
+                    result = "[错误] shell 命令为空或参数解析失败"
+                    await self._broadcast("tool.start", {
+                        "call_id": call_id, "name": name, "args": args,
+                        "message_id": self._current_message_id,
+                    })
+                    await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                    await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", "empty_command")
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+
                 # finish_task 直接处理
                 if name == "finish_task":
-                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    await self._broadcast("tool.start", {
+                        "call_id": call_id, "name": name, "args": args,
+                        "message_id": self._current_message_id,
+                    })
                     result = f"[完成] {args.get('message', '任务完成')}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
                     await self._persist_tool_log(name, args, result, call_id, False, 0, "config_allow")
@@ -739,7 +759,10 @@ class AgentLoop:
 
                 # M2 spawn_* 直接处理（不走 policy）；plan 模式禁止派生
                 if name in SPAWN_TOOLS:
-                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    await self._broadcast("tool.start", {
+                        "call_id": call_id, "name": name, "args": args,
+                        "message_id": self._current_message_id,
+                    })
                     if self.work_mode == "plan":
                         result = f"[拒绝] plan 模式只读，禁止 {name} (decision=blocked)"
                         await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
@@ -760,7 +783,10 @@ class AgentLoop:
                 )
 
                 if decision == "blocked":
-                    await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    await self._broadcast("tool.start", {
+                        "call_id": call_id, "name": name, "args": args,
+                        "message_id": self._current_message_id,
+                    })
                     result = f"[拒绝] {reason} (decision=blocked)"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
                     await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", reason)
@@ -811,22 +837,21 @@ class AgentLoop:
                 logger.exception("Tool dispatch error: %s", name)
                 return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
-        # 并行 gather；异常合成错误结果而非丢弃，保证 history 中
-        # assistant.tool_calls 与 tool 消息一一配对（缺失会导致模型 API 400）
-        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
+        # 按序执行：同轮「同类均执行」才能落到后续 shell；也避免审批卡片叠成一排
         out: list[dict] = []
-        for tc, r in zip(tool_calls, results):
-            if isinstance(r, BaseException):
+        for tc in tool_calls:
+            try:
+                out.append(await _run_one(tc))
+            except Exception as e:
+                logger.exception("Tool dispatch error: %s", tc.get("name"))
                 out.append(
                     {
                         "call_id": tc.get("id") or "",
                         "name": tc.get("name") or "",
-                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {r}",
+                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {e}",
                         "is_error": True,
                     }
                 )
-            else:
-                out.append(r)
         return out
 
     async def _handle_spawn_tool(self, name: str, args: dict) -> str:
@@ -887,15 +912,19 @@ class AgentLoop:
         return f"[错误] 未知 spawn 工具: {name}"
 
     async def _execute_tool(self, name: str, args: dict, call_id: str, decision: str, reason: str) -> dict:
-        await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+        args = normalize_tool_args(args)
+        await self._broadcast("tool.start", {
+            "call_id": call_id, "name": name, "args": args,
+            "message_id": self._current_message_id,
+        })
         start = time.time()
         is_error = False
         diff = None
         try:
             if name == "shell":
-                command = args.get("command") or args.get("cmd") or ""
+                command = shell_command(args)
                 # 空/不可解析参数（如 __raw 兜底）不执行，防止空命令静默成功
-                if not str(command).strip():
+                if not command:
                     result = "[错误] shell 命令为空或参数解析失败"
                     is_error = True
                     duration_ms = int((time.time() - start) * 1000)

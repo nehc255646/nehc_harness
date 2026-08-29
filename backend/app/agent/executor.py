@@ -17,6 +17,23 @@ except Exception:
     ChatOpenAI = None  # type: ignore
 
 
+def _lc_tool_calls(raw: list) -> list[dict]:
+    """历史里的 tool_calls 补齐 LangChain / OpenAI 需要的 type=tool_call。"""
+    out: list[dict] = []
+    for tc in raw or []:
+        if not isinstance(tc, dict):
+            continue
+        args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+        item = {
+            "name": tc.get("name") or "",
+            "args": args,
+            "id": tc.get("id") or "",
+            "type": "tool_call",
+        }
+        out.append(item)
+    return out
+
+
 def _to_lc_messages(messages: list[dict]) -> list:
     """OpenAI 格式 → LangChain 消息（ainvoke/astream 共用）。"""
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -32,10 +49,13 @@ def _to_lc_messages(messages: list[dict]) -> list:
         elif role == "assistant":
             kwargs: dict[str, Any] = {"content": content or ""}
             if m.get("tool_calls"):
-                kwargs["tool_calls"] = m["tool_calls"]
+                kwargs["tool_calls"] = _lc_tool_calls(m["tool_calls"])
             lc_messages.append(AIMessage(**kwargs))
         elif role == "tool":
-            lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
+            tm_kwargs: dict[str, Any] = {"content": str(content or ""), "tool_call_id": m.get("tool_call_id") or ""}
+            if m.get("name"):
+                tm_kwargs["name"] = m["name"]
+            lc_messages.append(ToolMessage(**tm_kwargs))
     return lc_messages
 
 

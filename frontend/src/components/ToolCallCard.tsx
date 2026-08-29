@@ -41,8 +41,9 @@ function summarize(name: string, args: unknown): string {
 
 export default function ToolCallCard({ tool }: { tool: ToolCallView }) {
   const running = tool.result === undefined;
-  const [open, setOpen] = useState(true);
   const text = resultText(tool.result);
+  const isErr = !running && /\[错误\]|\[拒绝\]|\[超时\]|\[异常\]/.test(text);
+  const [open, setOpen] = useState(() => running || isErr);
   const diff = tool.diff;
   const summary = summarize(tool.name, tool.args);
   const fileLike = tool.name === "write" || tool.name === "edit" || tool.name === "read";
@@ -63,6 +64,9 @@ export default function ToolCallCard({ tool }: { tool: ToolCallView }) {
         <span className="ml-auto shrink-0 font-mono text-[10px] text-faint">{tool.call_id.slice(0, 8)}</span>
         {running && (
           <span className="shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300">进行中</span>
+        )}
+        {isErr && (
+          <span className="shrink-0 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-300">失败</span>
         )}
       </button>
       {open && (

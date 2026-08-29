@@ -20,6 +20,7 @@ type ToolCall = {
   result?: unknown;
   diff?: FileDiffPayload;
   progress?: string;
+  messageId?: string;
 };
 type Approval = { approval_id: string; tool: string; args: unknown; reason: string };
 type SubPanelMessage = { id: string; role: string; content: string; streaming?: boolean };
@@ -117,41 +118,43 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         agentState: (p.agent_state as AgentState) || s.agentState,
       };
     });
-    // 从 REST 拉历史；按 id 合并，保留 hello 之后到达的流式/本地气泡
-    rest
-      .messages(sid2)
-      .then((rows) => {
-        set((s) => (s.sessionId === sid2 ? { messages: mergeChatMessages(historyToChat(rows), s.messages) } : {}));
-      })
-      .catch(() => {
-        /* mysql 降级时忽略 */
-      });
-    rest
-      .toolLogs(sid2)
-      .then((rows: ToolLogRow[]) => {
-        set((s) => {
-          if (s.sessionId !== sid2) return {};
-          const fromRest = rows
-            .filter((r) => r.agent_id === "main")
-            .map((r) => ({
-              call_id: r.tool_call_id,
-              name: r.name,
-              args: r.args,
-              result: r.result && typeof r.result === "object" && r.result !== null && "text" in r.result ? (r.result as { text?: unknown }).text : r.result,
-              diff: extractDiff(r.name, r.args, r.result),
-            }));
-          const restIds = new Set(fromRest.map((t) => t.call_id));
-          const liveById = new Map(s.toolCalls.map((t) => [t.call_id, t]));
-          const merged = fromRest.map((t) => liveById.get(t.call_id) ?? t);
-          for (const t of s.toolCalls) {
-            if (!restIds.has(t.call_id)) merged.push(t);
-          }
-          return { toolCalls: merged };
+    // 从 REST 拉历史与工具日志，工具挂到对应 assistant 消息上
+    void Promise.allSettled([rest.messages(sid2), rest.toolLogs(sid2)]).then((results) => {
+      const rows = results[0].status === "fulfilled" ? results[0].value : [];
+      const logs: ToolLogRow[] = results[1].status === "fulfilled" ? results[1].value : [];
+      set((s) => {
+        if (s.sessionId !== sid2) return {};
+        const patch: Partial<State> = {};
+        if (results[0].status === "fulfilled") {
+          patch.messages = mergeChatMessages(historyToChat(rows), s.messages);
+        }
+        const pkToPublic = new Map(rows.map((r) => [r.id, r.public_id]));
+        const fromRest: ToolCall[] = logs
+          .filter((r) => r.agent_id === "main")
+          .map((r) => ({
+            call_id: r.tool_call_id,
+            name: r.name,
+            args: r.args,
+            result:
+              r.result && typeof r.result === "object" && r.result !== null && "text" in r.result
+                ? (r.result as { text?: unknown }).text
+                : r.result,
+            diff: extractDiff(r.name, r.args, r.result),
+            messageId: (r.message_id != null ? pkToPublic.get(r.message_id) : undefined) || undefined,
+          }));
+        const restIds = new Set(fromRest.map((t) => t.call_id));
+        const liveById = new Map(s.toolCalls.map((t) => [t.call_id, t]));
+        const merged: ToolCall[] = fromRest.map((t) => {
+          const live = liveById.get(t.call_id);
+          return live ? { ...t, ...live, messageId: live.messageId || t.messageId } : t;
         });
-      })
-      .catch(() => {
-        /* ignore */
+        for (const t of s.toolCalls) {
+          if (!restIds.has(t.call_id)) merged.push(t);
+        }
+        patch.toolCalls = merged;
+        return patch;
       });
+    });
     rest
       .sessions()
       .then((rows) => set({ sessionRows: rows }))
@@ -237,7 +240,21 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("tool.start", (p) => {
     // 工作型子 agent 工具不进主聊天（PLAN §2.4：工作区仅列表，无详细日志）
     if (p.subagent_id) return;
-    set((s) => ({ toolCalls: [...s.toolCalls, { call_id: p.call_id as string, name: p.name as string, args: p.args }] }));
+    set((s) => {
+      const incoming: ToolCall = {
+        call_id: p.call_id as string,
+        name: p.name as string,
+        args: p.args,
+        messageId: typeof p.message_id === "string" ? p.message_id : undefined,
+      };
+      const idx = s.toolCalls.findIndex((t) => t.call_id === incoming.call_id);
+      if (idx >= 0) {
+        const copy = s.toolCalls.slice();
+        copy[idx] = { ...copy[idx], ...incoming, args: incoming.args ?? copy[idx].args };
+        return { toolCalls: copy };
+      }
+      return { toolCalls: [...s.toolCalls, incoming] };
+    });
   });
   wsClient.on("tool.result", (p) => {
     // 与 tool.start 一致：工作型子 agent 工具结果不进主聊天
@@ -458,8 +475,7 @@ export const useAgentStore = create<State>((set, get) => ({
     }
     set({ sendBlockedReason: "" });
     const localId = `local-${Date.now()}`;
-    const fresh = get().agentState === "idle" || get().agentState === "done" || get().agentState === "error";
-    set((s) => ({ messages: [...s.messages, { id: localId, role: "user", content }], toolCalls: fresh ? [] : s.toolCalls }));
+    set((s) => ({ messages: [...s.messages, { id: localId, role: "user", content }] }));
     wsClient.send("message.send", { session_id: sid, content });
   },
 

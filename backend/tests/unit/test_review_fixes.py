@@ -4,7 +4,12 @@ import asyncio
 import contextlib
 
 from app.agent import subagent as sa
-from app.agent.context import accumulate_tool_calls, parse_tool_calls
+from app.agent.context import (
+    accumulate_tool_calls,
+    normalize_tool_args,
+    parse_tool_calls,
+    shell_command,
+)
 from app.agent.loop import AgentLoop
 from app.core.config import settings
 from app.tools import shell as shell_mod
@@ -40,6 +45,45 @@ def test_parse_tool_calls_keeps_dict_args():
     acc = {0: {"name": "write", "args": {"path": "a.txt", "content": "x"}, "id": "w1", "index": 0}}
     tcs = parse_tool_calls(acc)
     assert tcs[0]["args"] == {"path": "a.txt", "content": "x"}
+
+
+def test_accumulate_empty_complete_does_not_wipe_fragments():
+    acc: dict[int, dict] = {}
+    accumulate_tool_calls(acc, {"tool_call_chunks": [{"name": "shell", "args": '{"command":"df -h"}', "id": "c1", "index": 0}]})
+    accumulate_tool_calls(acc, {"tool_calls": [{"name": "shell", "args": {}, "id": "c1", "index": 0}]})
+    tcs = parse_tool_calls(acc)
+    assert tcs[0]["args"]["command"] == "df -h"
+
+
+def test_accumulate_complete_without_index_does_not_duplicate():
+    acc: dict[int, dict] = {}
+    accumulate_tool_calls(acc, {"tool_call_chunks": [{"name": "shell", "args": '{"command":"uname"}', "id": "c1", "index": 0}]})
+    accumulate_tool_calls(acc, {"tool_calls": [{"name": "shell", "args": {"command": "uname"}, "id": "c1"}]})
+    tcs = parse_tool_calls(acc)
+    assert len(tcs) == 1
+    assert tcs[0]["args"] == {"command": "uname"}
+
+
+def test_accumulate_two_complete_calls_without_index():
+    acc: dict[int, dict] = {}
+    accumulate_tool_calls(
+        acc,
+        {
+            "tool_calls": [
+                {"name": "shell", "args": {"command": "echo a"}, "id": "c1"},
+                {"name": "shell", "args": {"command": "echo b"}, "id": "c2"},
+            ]
+        },
+    )
+    tcs = parse_tool_calls(acc)
+    assert [t["args"]["command"] for t in tcs] == ["echo a", "echo b"]
+
+
+def test_normalize_tool_args_recovers_command():
+    assert normalize_tool_args({"__raw": '{"command": "echo hi"}'}) == {"command": "echo hi"}
+    assert normalize_tool_args("uname -a") == {"command": "uname -a"}
+    assert shell_command({"__raw": '{"command": "df -h"}'}) == "df -h"
+    assert shell_command({"command": "  "}) == ""
 
 
 async def test_late_worker_batch_not_wake_main():
@@ -176,3 +220,81 @@ async def test_shell_empty_command_rejected(monkeypatch):
     res = await ag._execute_tool("shell", {"command": ""}, "c_empty", "config_allow", "")
     assert res["is_error"] is True
     assert "空" in res["result"]
+
+
+async def test_approve_similar_empty_shell_adds_no_rule():
+    from app.permissions.gate import gate
+
+    sid = "ut_empty_rule"
+    gate.clear_session_rules(sid)
+    aid, fut = await gate.request_approval(sid, "main", "shell", {}, "shell")
+    assert gate.resolve(aid, "approve_similar") is True
+    assert gate.get_session_rules(sid) == []
+    approved, decision, _reason = await fut
+    assert approved is True
+    assert decision == "approve_similar"
+
+
+async def test_empty_shell_skips_approval():
+    ag = AgentLoop("ut_empty_skip")
+    reqs: list[dict] = []
+
+    async def capture(_sid, event, payload):
+        if event == "approval.request":
+            reqs.append(payload)
+
+    ag.set_broadcaster(capture)
+    out = await ag._dispatch_tools([{"id": "c0", "name": "shell", "args": {}}])
+    assert out[0]["is_error"] is True
+    assert reqs == []
+
+
+async def test_shell_recovers_command_from_raw(monkeypatch):
+    ag = AgentLoop("ut_raw_cmd")
+    ran: list[str] = []
+
+    async def fake_shell(command, **_k):
+        ran.append(command)
+        return "ok", 0
+
+    async def noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.tools.shell.shell_async", fake_shell)
+    monkeypatch.setattr(ag, "_persist_tool_log", noop)
+    res = await ag._execute_tool("shell", {"__raw": '{"command": "uname -a"}'}, "c_raw", "config_allow", "")
+    assert res["is_error"] is False
+    assert ran == ["uname -a"]
+
+
+async def test_sequential_approve_similar_covers_later_shell(monkeypatch):
+    from app.permissions.gate import gate
+
+    sid = "ut_seq_appr"
+    ag = AgentLoop(sid)
+    gate.clear_session_rules(sid)
+    ran: list[str] = []
+
+    async def fake_shell(command, **_k):
+        ran.append(command)
+        return f"ok:{command}", 0
+
+    async def noop(*_a, **_k):
+        return None
+
+    async def capture(_sid, event, payload):
+        if event == "approval.request":
+            gate.resolve(payload["approval_id"], "approve_similar")
+
+    monkeypatch.setattr("app.tools.shell.shell_async", fake_shell)
+    monkeypatch.setattr(ag, "_persist_tool_log", noop)
+    ag.set_broadcaster(capture)
+    out = await ag._dispatch_tools(
+        [
+            {"id": "c1", "name": "shell", "args": {"command": "echo hello world"}},
+            {"id": "c2", "name": "shell", "args": {"command": "echo hello there"}},
+        ]
+    )
+    assert [r["is_error"] for r in out] == [False, False]
+    assert ran == ["echo hello world", "echo hello there"]
+    gate.clear_session_rules(sid)

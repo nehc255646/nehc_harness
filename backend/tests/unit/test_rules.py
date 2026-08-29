@@ -59,3 +59,9 @@ def test_session_allow():
     assert is_session_shell_allowed("git reset --hard", rules) is False
     assert is_session_tool_allowed("write", [{"kind": "tool", "pattern": "write"}]) is True
     assert is_session_tool_allowed("write", []) is False
+
+
+def test_empty_session_prefix_does_not_match():
+    rules = [{"kind": "shell_prefix", "pattern": ""}]
+    assert is_session_shell_allowed("echo hi &&", rules) is False
+    assert is_session_shell_allowed("uname -a", rules) is False
