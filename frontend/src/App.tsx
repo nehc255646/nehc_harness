@@ -44,6 +44,7 @@ export default function App() {
     sessionId,
     sessionRows,
     subPanels,
+    workers,
     subPanelOpen,
     setSubPanelOpen,
     toggleSubAgent,
@@ -51,7 +52,11 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
-  const busy = agentState === "running" || agentState === "awaiting_approval";
+  const busy =
+    agentState === "running" ||
+    agentState === "awaiting_approval" ||
+    workers.some((w) => w.state === "running") ||
+    subPanels.some((p) => p.status === "running");
   const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Agent Harness";
   const subCount = subPanels.length;
 
@@ -111,13 +116,15 @@ export default function App() {
               type="button"
               onClick={() => toggleSubAgent()}
               className={`ui-btn-ghost shrink-0 whitespace-nowrap px-2 ${subPanelOpen ? "text-accent" : ""}`}
-              title={subPanelOpen ? "收起交互子 agent" : "打开交互子 agent"}
+              title={subPanelOpen ? "收起子 Agent 侧栏" : "打开子 Agent 侧栏"}
               aria-pressed={subPanelOpen}
             >
               <IconPanelRight className="h-4 w-4" />
-              <span className="hidden sm:inline">子 Agent</span>
-              {subCount > 0 && (
-                <span className="rounded-full bg-accent-dim px-1.5 text-[10px] text-accent">{subCount}</span>
+              <span className="hidden sm:inline">侧栏</span>
+              {(subCount > 0 || workers.length > 0) && (
+                <span className="rounded-full bg-accent-dim px-1.5 text-[10px] text-accent">
+                  {subCount + workers.length}
+                </span>
               )}
             </button>
             <button
@@ -137,12 +144,14 @@ export default function App() {
           </div>
         </header>
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <div className="min-w-0 flex-1 overflow-hidden">
-            <Chat />
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            {!subPanelOpen && workers.length > 0 && <WorkerStatus peek />}
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <Chat />
+            </div>
           </div>
           <SubAgentPanel open={subPanelOpen} onClose={() => setSubPanelOpen(false)} />
         </div>
-        <WorkerStatus />
       </div>
       <ModelSettings
         open={settingsOpen}

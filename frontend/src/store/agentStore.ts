@@ -47,7 +47,14 @@ type SubPanel = {
   late?: boolean;
   messages: SubPanelMessage[];
 };
-type WorkerItem = { subagent_id: string; task_summary: string; state: string; batch_id?: string; late?: boolean };
+type WorkerItem = {
+  subagent_id: string;
+  task_summary: string;
+  state: string;
+  batch_id?: string;
+  late?: boolean;
+  result?: string;
+};
 type AgentState = "idle" | "running" | "awaiting_approval" | "done" | "error";
 
 type State = {
@@ -75,6 +82,7 @@ type State = {
   restorePanels: () => void;
   setSubPanelOpen: (open: boolean) => void;
   toggleSubAgent: () => void;
+  startInteractive: () => void;
   stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
   boot: () => Promise<void>;
@@ -133,9 +141,14 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
         subPanels: merged,
         dismissedPanels: switched ? [] : s.dismissedPanels,
-        subPanelOpen: switched ? false : s.subPanelOpen,
         workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
         agentState: (p.agent_state as AgentState) || s.agentState,
+        subPanelOpen: switched
+          ? Boolean(
+              merged.some((x) => x.status === "running") ||
+                (Array.isArray(p.workers) && (p.workers as WorkerItem[]).some((w) => w.state === "running")),
+            )
+          : s.subPanelOpen,
       };
     });
     // 从 REST 拉历史与工具日志，工具挂到对应 assistant 消息上
@@ -236,13 +249,31 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     };
     if (subagentId) {
       set((s) => ({
-        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => msgs.map(patchMsg)),
+        subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => {
+          if (msgs.some((m) => m.id === id)) return msgs.map(patchMsg);
+          return [
+            ...msgs,
+            thinkingCh
+              ? { id, role: "assistant", content: "", thinking: delta, thinkingStreaming: true, streaming: true }
+              : { id, role: "assistant", content: delta, thinking: "", streaming: true },
+          ];
+        }),
       }));
       return;
     }
-    set((s) => ({
-      messages: s.messages.map(patchMsg),
-    }));
+    set((s) => {
+      if (s.messages.some((m) => m.id === id)) {
+        return { messages: s.messages.map(patchMsg) };
+      }
+      return {
+        messages: [
+          ...s.messages,
+          thinkingCh
+            ? { id, role: "assistant", content: "", thinking: delta, thinkingStreaming: true, streaming: true }
+            : { id, role: "assistant", content: delta, thinking: "", streaming: true },
+        ],
+      };
+    });
   });
 
   wsClient.on("message.done", (p) => {
@@ -370,7 +401,6 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   });
   wsClient.on("subagent.opened", (p) => {
     const panel = p as unknown as SubPanel;
-    // interactive 侧栏，worker 忽略（由 worker.status 展示）
     if (panel.kind === "interactive") {
       set((s) => ({
         subPanels: [
@@ -378,7 +408,10 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
           { ...panel, messages: [] },
         ],
         dismissedPanels: s.dismissedPanels.filter((id) => id !== panel.subagent_id),
+        subPanelOpen: true,
       }));
+    } else if (panel.kind === "worker") {
+      set({ subPanelOpen: true });
     }
   });
   wsClient.on("subagent.done", (p) => {
@@ -390,13 +423,22 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   });
   wsClient.on("worker.status", (p) => {
     const workers = (p.workers as WorkerItem[]) || [];
-    set({ workers });
+    set((s) => ({
+      workers,
+      subPanelOpen: s.subPanelOpen || workers.some((w) => w.state === "running"),
+    }));
   });
   wsClient.on("worker.batch_done", (p) => {
-    // 批量完成已通过主 agent 消息注入上下文，此处仅刷新 workers
     const batchId = p.batch_id as string;
+    const done = (p.workers as { subagent_id?: string; status?: string; result?: string }[]) || [];
     set((s) => ({
-      workers: s.workers.map((w) => (w.batch_id === batchId ? { ...w, state: "done" } : w)),
+      workers: s.workers.map((w) => {
+        const hit = done.find((d) => d.subagent_id === w.subagent_id);
+        if (hit) {
+          return { ...w, state: hit.status || "done", result: hit.result ?? w.result };
+        }
+        return w.batch_id === batchId ? { ...w, state: "done" } : w;
+      }),
     }));
   });
   wsClient.on("subagent.message", (p) => {
@@ -553,17 +595,20 @@ export const useAgentStore = create<State>((set, get) => ({
   },
   restorePanels: () => set({ dismissedPanels: [], subPanelOpen: true }),
   setSubPanelOpen: (open) => set({ subPanelOpen: open }),
+  startInteractive: () => {
+    const s = get();
+    set({ dismissedPanels: [], subPanelOpen: true });
+    if (!s.subPanels.some((p) => p.status === "running")) {
+      wsClient.send("subagent.open", { session_id: s.sessionId });
+    }
+  },
   toggleSubAgent: () => {
     const s = get();
     if (s.subPanelOpen) {
       set({ subPanelOpen: false });
       return;
     }
-    set({ dismissedPanels: [], subPanelOpen: true });
-    const running = s.subPanels.some((p) => p.status === "running");
-    if (!running) {
-      wsClient.send("subagent.open", { session_id: s.sessionId });
-    }
+    get().startInteractive();
   },
   stopWorker: (subagent_id) => {
     wsClient.send("agent.stop", { agent_id: subagent_id });

@@ -12,27 +12,38 @@ class AgentManager:
     def __init__(self):
         self._agents: dict[str, AgentLoop] = {}
         self._broadcast_fn = None
+        self._create_locks: dict[str, asyncio.Lock] = {}
 
     def set_broadcaster(self, fn):
         self._broadcast_fn = fn
         for agent in self._agents.values():
             agent.set_broadcaster(fn)
 
+    def _lock_for(self, session_id: str) -> asyncio.Lock:
+        lock = self._create_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._create_locks[session_id] = lock
+        return lock
+
     async def get_or_create(self, session_id: str) -> AgentLoop:
-        if session_id not in self._agents:
+        async with self._lock_for(session_id):
+            existing = self._agents.get(session_id)
+            if existing is not None:
+                return existing
             agent = AgentLoop(session_id, broadcaster=self._broadcast_fn)
-            self._agents[session_id] = agent
-            logger.info("Agent created: %s", session_id)
             try:
                 await agent.hydrate_from_db()
             except Exception:
                 logger.exception("hydrate_from_db failed: %s", session_id)
+            self._agents[session_id] = agent
+            logger.info("Agent created: %s", session_id)
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(agent.start())
             except RuntimeError:
                 pass
-        return self._agents[session_id]
+            return agent
 
     def get(self, session_id: str) -> AgentLoop | None:
         return self._agents.get(session_id)
@@ -74,13 +85,19 @@ class AgentManager:
         return list(self._agents.keys())
 
     async def stop(self, session_id: str):
+        try:
+            from app.agent.subagent import stop_session_subagents
+
+            await stop_session_subagents(session_id)
+        except Exception:
+            logger.exception("stop subagents failed: %s", session_id)
         agent = self._agents.get(session_id)
         if agent:
             await agent.stop()
 
     async def stop_all(self):
-        for agent in list(self._agents.values()):
-            await agent.stop()
+        for sid in list(self._agents.keys()):
+            await self.stop(sid)
 
 
 manager = AgentManager()

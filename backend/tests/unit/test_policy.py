@@ -59,3 +59,15 @@ def test_plan_mode_blocks_shell():
     decision, _, need = check_policy("shell", {"command": "git status"}, [], work_mode="plan")
     assert decision == "blocked"
     assert need is False
+
+
+def test_chained_allowlist_needs_approval():
+    decision, _, need = check_policy("shell", {"command": "ls; echo pwned"}, [])
+    assert decision == "need_approval"
+    assert need is True
+
+
+def test_path_rm_blocked_even_after_ls():
+    decision, _, need = check_policy("shell", {"command": "ls; /bin/rm -rf /tmp/x"}, [])
+    assert decision == "blocked"
+    assert need is False

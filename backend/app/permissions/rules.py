@@ -1,5 +1,6 @@
 """规则解析与前缀匹配"""
 
+import os
 import re
 from pathlib import Path
 
@@ -48,20 +49,29 @@ def get_allow_tools() -> list[str]:
     return _load_yaml().get("allow_tools", [])
 
 
-def is_shell_prefix_allowed(command: str) -> bool:
-    """检查是否命中 allow_rules.yaml 的 allow_shell 前缀"""
-    prefixes = get_allow_shell_prefixes()
+def _segment_matches_prefix(sub: str, prefixes: list[str]) -> bool:
+    for p in prefixes:
+        pat = (p or "").strip()
+        if not pat:
+            continue
+        if sub == pat or sub.startswith(pat + " "):
+            return True
+    return False
+
+
+def _all_segments_prefix_allowed(command: str, prefixes: list[str]) -> bool:
+    """每段子命令都必须命中前缀，避免 `ls; 其它` 因 ls 整条放行。"""
     if not prefixes:
         return False
-    # 按 bash 语义拆分子命令后逐段检查 (与黑名单一致)
-    for sub in _split_shell_commands(command):
-        sub = sub.strip()
-        if not sub:
-            continue
-        for p in prefixes:
-            if sub == p or sub.startswith(p + " "):
-                return True
-    return False
+    segs = [s.strip() for s in _split_shell_commands(command) if s.strip()]
+    if not segs:
+        return False
+    return all(_segment_matches_prefix(sub, prefixes) for sub in segs)
+
+
+def is_shell_prefix_allowed(command: str) -> bool:
+    """检查是否命中 allow_rules.yaml 的 allow_shell 前缀"""
+    return _all_segments_prefix_allowed(command, get_allow_shell_prefixes())
 
 
 def is_tool_allowed(tool_name: str) -> bool:
@@ -106,17 +116,24 @@ def _unwrap_token(tok: str) -> str:
     return re.sub(r"^\W+|\W+$", "", tok)
 
 
+def _token_basename(tok: str) -> str:
+    return os.path.basename(_unwrap_token(tok))
+
+
 def _rm_rf_hit(tokens: list[str]) -> bool:
     """rm 同时带递归与强制旗标即命中。
 
-    扫描 token 序列任意位置出现的 rm（含 sudo rm），覆盖命令替换/换行等
-    拆分器无法切开的嵌套写法，如 echo $(rm -rf /)。
+    扫描 token 序列任意位置出现的 rm（含路径形式 /bin/rm、sudo rm），覆盖
+    命令替换/换行等拆分器无法切开的嵌套写法，如 echo $(rm -rf /)。
     """
     for i, tok in enumerate(tokens):
-        unwrapped = _unwrap_token(tok)
-        if unwrapped != "rm" and not (unwrapped == "sudo" and i + 1 < len(tokens) and _unwrap_token(tokens[i + 1]) == "rm"):
+        name = _token_basename(tok)
+        if name == "rm":
+            start = i
+        elif name == "sudo" and i + 1 < len(tokens) and _token_basename(tokens[i + 1]) == "rm":
+            start = i + 1
+        else:
             continue
-        start = i + 1 if unwrapped == "sudo" else i
         if _rm_flags_hit(tokens[start + 1 :]):
             return True
     return False
@@ -162,19 +179,14 @@ def is_blacklisted(command: str) -> tuple[bool, str | None]:
 
 def is_session_shell_allowed(command: str, session_rules: list[dict]) -> bool:
     """检查是否命中会话放行规则 (kind=shell_prefix)"""
+    prefixes = []
     for rule in session_rules:
         if rule.get("kind") != "shell_prefix":
             continue
         pat = (rule.get("pattern") or "").strip()
-        if not pat:
-            continue
-        for sub in _split_shell_commands(command):
-            sub = sub.strip()
-            if not sub:
-                continue
-            if sub == pat or sub.startswith(pat + " "):
-                return True
-    return False
+        if pat:
+            prefixes.append(pat)
+    return _all_segments_prefix_allowed(command, prefixes)
 
 
 def is_session_tool_allowed(tool_name: str, session_rules: list[dict]) -> bool:

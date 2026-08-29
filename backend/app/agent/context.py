@@ -20,7 +20,7 @@ def build_messages(system: str, summary: str | None, window_messages: list, pend
     """注入顺序：system + 摘要 + 窗口消息 + 本轮"""
     messages = [{"role": "system", "content": system}]
     if summary:
-        messages.append({"role": "system", "content": f"[摘要]\n{summary}"})
+        messages.append({"role": "system", "content": f"[Summary]\n{summary}"})
     messages.extend(window_messages)
     messages.extend(pending)
     return messages
@@ -45,6 +45,34 @@ def estimate_tokens(messages: list[dict], summary: str | None = None) -> int:
         except Exception:
             logger.debug("tiktoken encode failed, fallback to chars/4")
     return max(1, len(text) // 4)
+
+
+def unmatched_tool_results(history: list[dict]) -> list[dict]:
+    """assistant.tool_calls 缺少对应 tool 行时补合成错误，避免重启后发给模型 400。"""
+    seen: set[str] = set()
+    for m in history:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            seen.add(str(m["tool_call_id"]))
+    extra: list[dict] = []
+    for m in history:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            cid = str(tc.get("id") or "")
+            if not cid or cid in seen:
+                continue
+            extra.append(
+                {
+                    "role": "tool",
+                    "content": "[中断] 工具结果未落库（进程停止或崩溃）",
+                    "tool_call_id": cid,
+                    "name": tc.get("name") or "",
+                }
+            )
+            seen.add(cid)
+    return extra
 
 
 def window_slice(history: list[dict], window_n: int) -> tuple[list[dict], list[dict]]:

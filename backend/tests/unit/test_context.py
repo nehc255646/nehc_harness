@@ -7,6 +7,7 @@ from app.agent.context import (
     should_summarize,
     slid_fingerprint,
     truncate_tool_result,
+    unmatched_tool_results,
     window_slice,
 )
 
@@ -16,7 +17,7 @@ def test_build_messages_order():
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == "sys"
     assert msgs[1]["role"] == "system"
-    assert msgs[1]["content"] == "[摘要]\nsummary"
+    assert msgs[1]["content"] == "[Summary]\nsummary"
     assert msgs[2]["content"] == "u"
     assert msgs[3]["content"] == "p"
 
@@ -81,6 +82,21 @@ def test_summary_cache_version_increments_on_success():
     assert second["version"] == 2
     assert second["covered_count"] == 6
     assert second["text"] == "摘要2"
+
+
+def test_unmatched_tool_results_synthesizes_missing():
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"name": "shell", "args": {"command": "echo"}, "id": "c1"}],
+        }
+    ]
+    extra = unmatched_tool_results(history)
+    assert len(extra) == 1
+    assert extra[0]["tool_call_id"] == "c1"
+    paired = history + extra
+    assert unmatched_tool_results(paired) == []
 
 
 def test_summary_cache_keeps_pending_on_failure():

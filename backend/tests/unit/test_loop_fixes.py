@@ -4,7 +4,8 @@ import asyncio
 
 from app.agent import subagent as sa
 from app.agent.loop import AgentLoop
-from app.agent.prompts import PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT
+from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
+from app.core.config import settings
 from app.tools.registry import PLAN_TOOLS, TOOLS
 
 
@@ -159,27 +160,35 @@ async def test_unresolved_executor_does_not_heuristic():
 
 async def test_worker_single_batch_completes_and_cleans():
     """单 worker 完成后批次聚合并清理，结果回投主 agent 队列"""
+    import uuid
+
     from app.permissions.gate import gate
 
     got: list[dict] = []
+    sid = f"ut_wb_{uuid.uuid4().hex[:8]}"
 
     async def capture_enqueue(ev):
         got.append(ev)
 
-    gate.add_session_rule("ut_wb", {"kind": "shell_prefix", "pattern": "echo"})
-    res = await sa.spawn_worker_batch("ut_wb", ["echo 任务"], [], None, None, capture_enqueue, lambda _sid: None)
-    assert "已派生" in res
-    wid = sa.get_workers("ut_wb")[0]["subagent_id"]
-    batch_id = sa.get_workers("ut_wb")[0]["batch_id"]
-    for _ in range(100):
-        await asyncio.sleep(0.05)
-        if sa.get_workers("ut_wb")[0]["state"] != "running":
-            break
-    assert sa.get_workers("ut_wb")[0]["state"] == "done"
-    assert batch_id not in sa._batches, "批次完成后应清理"
-    assert got, "batch_done 应回投主 agent 队列"
-    assert got[0]["type"] == "worker_batch_done"
-    assert got[0]["payload"]["workers"][0]["subagent_id"] == wid
+    gate.add_session_rule(sid, {"kind": "shell_prefix", "pattern": "echo"})
+    try:
+        res = await sa.spawn_worker_batch(sid, ["列出演示目录"], [], None, None, capture_enqueue, lambda _sid: None)
+        assert "已派生" in res
+        wid = sa.get_workers(sid)[0]["subagent_id"]
+        batch_id = sa.get_workers(sid)[0]["batch_id"]
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if sa.get_workers(sid)[0]["state"] != "running":
+                break
+        assert sa.get_workers(sid)[0]["state"] == "done"
+        assert batch_id not in sa._batches, "批次完成后应清理"
+        assert got, "batch_done 应回投主 agent 队列"
+        assert got[0]["type"] == "worker_batch_done"
+        assert got[0]["payload"]["workers"][0]["subagent_id"] == wid
+    finally:
+        await sa.stop_session_subagents(sid)
+        sa.purge_session(sid)
+        gate.clear_session_rules(sid)
 
 
 def test_system_prompt_switches_with_work_mode():
@@ -188,15 +197,28 @@ def test_system_prompt_switches_with_work_mode():
     auto_msgs = ag._build_messages()
     assert auto_msgs[0]["role"] == "system"
     assert auto_msgs[0]["content"] == SYSTEM_PROMPT
-    assert "当前工作模式是 auto" in auto_msgs[0]["content"]
+    assert "Work mode: auto" in auto_msgs[0]["content"]
     ag.set_work_mode("plan")
     plan_msgs = ag._build_messages()
     assert plan_msgs[0]["content"] == PLAN_SYSTEM_PROMPT
-    assert "当前工作模式是 plan" in plan_msgs[0]["content"]
+    assert "Work mode: plan" in plan_msgs[0]["content"]
     assert plan_msgs[0]["content"] != SYSTEM_PROMPT
     assert ag._bound_tools() == PLAN_TOOLS
     ag.set_work_mode("auto")
     assert ag._bound_tools() == TOOLS
+
+
+def test_subagent_system_prompts_are_distinct_english():
+    assert "BACKGROUND WORKER" in WORKER_SYSTEM_PROMPT
+    assert "INTERACTIVE SIDEBAR" in INTERACTIVE_SYSTEM_PROMPT
+    assert "finish_worker" in WORKER_SYSTEM_PROMPT
+    assert "finish_subagent" in INTERACTIVE_SYSTEM_PROMPT
+    assert "sidebar" in INTERACTIVE_SYSTEM_PROMPT.lower()
+    assert "Do not ask the user questions" in WORKER_SYSTEM_PROMPT
+    assert "no file, shell, or spawn tools" in INTERACTIVE_SYSTEM_PROMPT
+    assert WORKER_SYSTEM_PROMPT != INTERACTIVE_SYSTEM_PROMPT
+    assert "You are the MAIN" in SYSTEM_PROMPT
+    assert "You are the MAIN" in PLAN_SYSTEM_PROMPT
 
 
 def test_heuristic_plan_does_not_emit_shell():
@@ -205,6 +227,14 @@ def test_heuristic_plan_does_not_emit_shell():
     res = ag._heuristic_fallback([{"role": "user", "content": "执行 echo hello"}])
     assert res["tool_calls"] == []
     assert "plan" in res["text"]
+
+
+async def test_spawn_rejects_task_equal_to_user_goal():
+    ag = AgentLoop("ut_spawn_clone")
+    ag.history = [{"role": "user", "content": "重构整个工作区"}]
+    res = await ag._handle_spawn_tool("spawn_worker", {"task": "重构整个工作区"})
+    assert "拒绝" in res
+    assert ag._turn_spawned == 0
 
 
 async def test_plan_mode_blocks_spawn_dispatch():
@@ -225,3 +255,99 @@ async def test_plan_mode_blocks_write_dispatch():
     )
     assert out[0]["is_error"] is True
     assert "plan" in out[0]["result"]
+
+
+async def test_get_or_create_waits_for_hydrate():
+    from app.agent.manager import AgentManager
+
+    mgr = AgentManager()
+    sid = "ut_hydrate_lock"
+    order: list[str] = []
+
+    async def slow_hydrate(self):
+        order.append("hydrate_start")
+        await asyncio.sleep(0.05)
+        self.history = [{"role": "user", "content": "fromdb"}]
+        order.append("hydrate_end")
+
+    orig = AgentLoop.hydrate_from_db
+    AgentLoop.hydrate_from_db = slow_hydrate  # type: ignore[method-assign]
+    try:
+
+        async def use():
+            ag = await mgr.get_or_create(sid)
+            order.append(f"got:{len(ag.history)}")
+            return ag
+
+        a, b = await asyncio.gather(use(), use())
+        assert a is b
+        assert a.history[0]["content"] == "fromdb"
+        assert order[0] == "hydrate_start"
+        assert "hydrate_end" in order
+        assert order.index("hydrate_end") < order.index("got:1")
+    finally:
+        AgentLoop.hydrate_from_db = orig  # type: ignore[method-assign]
+        await mgr.drop(sid)
+
+
+async def test_manager_stop_halts_workers():
+    from app.agent.manager import AgentManager
+    from app.permissions.gate import gate
+
+    mgr = AgentManager()
+    sid = "ut_stop_workers"
+    agent = AgentLoop(sid)
+    mgr._agents[sid] = agent
+    gate.add_session_rule(sid, {"kind": "shell_prefix", "pattern": "echo"})
+
+    async def noop_enqueue(_ev):
+        return None
+
+    res = await sa.spawn_worker_batch(sid, ["sleep 8"], [], None, None, noop_enqueue, mgr.get)
+    assert "已派生" in res
+    wid = sa.get_workers(sid)[0]["subagent_id"]
+    await asyncio.sleep(0.15)
+    await mgr.stop(sid)
+    await asyncio.sleep(0.4)
+    rec = sa._subagents.get(wid)
+    assert rec is not None
+    assert rec.status != "running"
+    gate.clear_session_rules(sid)
+
+
+async def test_worker_plan_mode_blocks_write():
+    main = AgentLoop("ut_wk_plan")
+    main.set_work_mode("plan")
+    loop = sa.SubAgentLoop(
+        session_id="ut_wk_plan",
+        subagent_id="wk_plan1",
+        kind="worker",
+        task="写文件",
+        behavior_desc="",
+        snapshot=[],
+        summary=None,
+        broadcaster=None,
+        main_enqueue=None,
+        manager_get=lambda _sid: main,
+        work_mode="auto",
+    )
+    out = await loop._dispatch_worker_tools(
+        [{"id": "c1", "name": "write", "args": {"path": "a.txt", "content": "x"}}]
+    )
+    assert out[0]["is_error"] is True
+    assert "plan" in out[0]["result"]
+
+
+async def test_spawn_lock_respects_concurrency(monkeypatch):
+    monkeypatch.setattr(settings, "subagent_max_concurrency", 1)
+
+    async def noop_enqueue(_ev):
+        return None
+
+    sid = "ut_spawn_lock"
+    first = await sa.spawn_interactive(sid, "a", "a", [], None, None, noop_enqueue, lambda _s: None)
+    assert "已派生" in first
+    second = await sa.spawn_interactive(sid, "b", "b", [], None, None, noop_enqueue, lambda _s: None)
+    assert "拒绝" in second
+    await sa.stop_session_subagents(sid)
+    await asyncio.sleep(0.2)

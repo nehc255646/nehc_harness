@@ -12,6 +12,7 @@ from app.persist import (
     ensure_session,
     load_late_subagent_results,
     save_message,
+    save_summary,
     upsert_subagent_run,
 )
 
@@ -57,6 +58,25 @@ async def test_hydrate_then_start_does_not_call_model():
     await ag.stop()
 
 
+async def test_hydrate_keeps_full_history_without_summary():
+    ok = await init_db()
+    if not ok:
+        import pytest
+
+        pytest.skip("MySQL unavailable")
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="window")
+    keep = settings.window_n * 2
+    total = keep + 4
+    for i in range(total):
+        role = "user" if i % 2 == 0 else "assistant"
+        await save_message(session_id=sid, agent_id="main", role=role, content=f"m{i}")
+    agent = AgentLoop(sid)
+    await agent.hydrate_from_db()
+    assert len(agent.history) == total
+    assert agent.history[0]["content"] == "m0"
+
+
 async def test_hydrate_applies_window_slice():
     ok = await init_db()
     if not ok:
@@ -69,10 +89,32 @@ async def test_hydrate_applies_window_slice():
     for i in range(keep + 4):
         role = "user" if i % 2 == 0 else "assistant"
         await save_message(session_id=sid, agent_id="main", role=role, content=f"m{i}")
+    await save_summary(sid, "已覆盖的旧对话")
     agent = AgentLoop(sid)
     await agent.hydrate_from_db()
     assert len(agent.history) == keep
     assert agent.history[0]["content"] == "m4"
+
+
+async def test_hydrate_pairs_unmatched_tool_calls():
+    ok = await init_db()
+    if not ok:
+        pytest.skip("MySQL unavailable")
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="unpaired")
+    await save_message(
+        session_id=sid,
+        agent_id="main",
+        role="assistant",
+        content="",
+        tool_calls=[{"name": "shell", "args": {"command": "echo hi"}, "id": "c_unpaired"}],
+    )
+    agent = AgentLoop(sid)
+    await agent.hydrate_from_db()
+    tools = [m for m in agent.history if m.get("role") == "tool"]
+    assert len(tools) == 1
+    assert tools[0]["tool_call_id"] == "c_unpaired"
+    assert "中断" in tools[0]["content"]
 
 
 async def test_hydrate_feeds_back_late_subagent_results():

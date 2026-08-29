@@ -19,10 +19,11 @@ from app.agent.context import (
     should_summarize,
     slid_fingerprint,
     truncate_tool_result,
+    unmatched_tool_results,
     window_slice,
 )
 from app.agent.executor import Executor
-from app.agent.prompts import PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT
+from app.agent.prompts import PLAN_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT, SYSTEM_PROMPT
 from app.agent.stream import ThinkTagSplitter, iter_channels
 from app.core import rtstore
 from app.core.config import settings
@@ -94,12 +95,6 @@ class AgentLoop:
     async def hydrate_from_db(self):
         """M3: 从 DB 历史 + 摘要重建上下文，并按会话模型实例化 executor。"""
         hist, summary, _mid = await persist_mod.load_history(self.session_id)
-        if hist:
-            _slid, window = window_slice(hist, settings.window_n)
-            self.history = window
-            logger.info("Hydrated %d messages for session=%s", len(window), self.session_id)
-        if summary:
-            self.summary = summary
         try:
             cache = await rtstore.get_summary_cache(self.session_id)
         except Exception:
@@ -107,9 +102,32 @@ class AgentLoop:
         if cache:
             self.summary_version = int(cache.get("version") or 0)
             self.summary_covered = int(cache.get("covered_count") or 0)
-            if not self.summary and cache.get("text"):
+            if cache.get("text"):
                 self.summary = str(cache["text"])
-        elif self.summary:
+        if summary and not self.summary:
+            self.summary = summary
+        pending_slid = list((cache or {}).get("pending_slid") or [])
+        if hist or pending_slid:
+            hist = list(hist or [])
+            if pending_slid:
+                hist_sigs = {_msg_sig(m) for m in hist}
+                hist = [m for m in pending_slid if _msg_sig(m) not in hist_sigs] + hist
+            has_summary = bool(self.summary)
+            if has_summary and not pending_slid:
+                _slid, window = window_slice(hist, settings.window_n)
+                self.history = window
+            else:
+                self.history = hist
+            for extra in unmatched_tool_results(self.history):
+                self.history.append(extra)
+                await self._persist_message(
+                    "tool",
+                    extra["content"],
+                    tool_call_id=extra.get("tool_call_id"),
+                    name=extra.get("name"),
+                )
+            logger.info("Hydrated %d messages for session=%s", len(self.history), self.session_id)
+        if self.summary and not cache:
             try:
                 await rtstore.set_summary_cache(
                     self.session_id,
@@ -125,8 +143,19 @@ class AgentLoop:
         for run in late_runs:
             content = f"[迟到子 agent 结果 {run.subagent_id}]\n{run.result}"
             self.history.append({"role": "user", "content": content})
-            await self._persist_message("user", content)
-            await persist_mod.mark_subagent_fed_back(run.subagent_id)
+            try:
+                pid = await persist_mod.save_message(
+                    session_id=self.session_id,
+                    agent_id=self.agent_id,
+                    role="user",
+                    content=content,
+                    enqueue_on_fail=False,
+                )
+            except Exception:
+                logger.debug("persist late subagent result failed", exc_info=True)
+                pid = None
+            if pid:
+                await persist_mod.mark_subagent_fed_back(run.subagent_id)
         if late_runs:
             logger.info("Fed back %d late subagent results for session=%s", len(late_runs), self.session_id)
         self.executor = await Executor.from_session_id(self.session_id)
@@ -447,7 +476,7 @@ class AgentLoop:
         tool_calls: list | None = None,
         name: str | None = None,
         thinking: str | None = None,
-    ):
+    ) -> bool:
         try:
             await persist_mod.save_message(
                 session_id=self.session_id,
@@ -460,8 +489,10 @@ class AgentLoop:
                 name=name,
                 thinking=thinking,
             )
+            return True
         except Exception:
             logger.debug("persist message failed", exc_info=True)
+            return False
 
     async def _persist_tool_log(
         self,
@@ -549,8 +580,11 @@ class AgentLoop:
             return None
         text = "\n".join(f"{m.get('role')}: {str(m.get('content', ''))[:800]}" for m in slid)
         prompt = [
-            {"role": "system", "content": "将对话压缩为简洁摘要，保留任务目标、关键决策、文件变更与未决事项。只输出摘要正文。"},
-            {"role": "user", "content": f"旧摘要:\n{self.summary or '(无)'}\n\n新滑出消息:\n{text}"},
+            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Previous summary:\n{self.summary or '(none)'}\n\nSlid-out messages:\n{text}",
+            },
         ]
         try:
             result = await self.executor.ainvoke(prompt)
@@ -708,18 +742,21 @@ class AgentLoop:
             }
         if "spawn_workers" in last_user_lower:
             return {
-                "text": "准备批量派生后台工作型：",
-                "tool_calls": [{"name": "spawn_workers", "args": {"tasks": [f"子任务1: {last_user[:50]}", f"子任务2: {last_user[50:100]}"]}, "id": str(uuid.uuid4())}],
+                "text": "准备派生两个互不重叠的演示工人：",
+                "tool_calls": [{
+                    "name": "spawn_workers",
+                    "args": {"tasks": ["列出 workspace 顶层文件名", "读取 hello.txt（若存在）"]},
+                    "id": str(uuid.uuid4()),
+                }],
             }
         if "spawn_worker" in last_user_lower or "派生工作" in last_user_lower or "后台任务" in last_user_lower:
             return {
-                "text": "准备派生后台工作型：",
-                "tool_calls": [{"name": "spawn_worker", "args": {"task": last_user[:200]}, "id": str(uuid.uuid4())}],
-            }
-        if "批量" in last_user_lower:
-            return {
-                "text": "准备批量派生后台工作型：",
-                "tool_calls": [{"name": "spawn_workers", "args": {"tasks": [f"子任务1: {last_user[:50]}", f"子任务2: {last_user[50:100]}"]}, "id": str(uuid.uuid4())}],
+                "text": "准备派生一个窄范围演示工人：",
+                "tool_calls": [{
+                    "name": "spawn_worker",
+                    "args": {"task": "列出 workspace 顶层文件名"},
+                    "id": str(uuid.uuid4()),
+                }],
             }
         if "rm -rf" in last_user_lower or "mkfs" in last_user_lower:
             cmd = last_user.strip()
@@ -885,22 +922,56 @@ class AgentLoop:
                 logger.exception("Tool dispatch error: %s", name)
                 return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
+        def _synth_stopped(tc: dict) -> dict:
+            return {
+                "call_id": tc.get("id") or "",
+                "name": tc.get("name") or "",
+                "result": "[中断] 任务已停止，工具未执行完毕",
+                "is_error": True,
+            }
+
         # 按序执行：同轮「同类均执行」才能落到后续 shell；也避免审批卡片叠成一排
         out: list[dict] = []
-        for tc in tool_calls:
-            try:
-                out.append(await _run_one(tc))
-            except Exception as e:
-                logger.exception("Tool dispatch error: %s", tc.get("name"))
-                out.append(
-                    {
-                        "call_id": tc.get("id") or "",
-                        "name": tc.get("name") or "",
-                        "result": f"[异常] 工具 {tc.get('name')} 分发失败: {e}",
-                        "is_error": True,
-                    }
+        try:
+            for tc in tool_calls:
+                if self._stop_event.is_set():
+                    syn = _synth_stopped(tc)
+                    await self._persist_tool_log(
+                        syn["name"], tc.get("args") or {}, syn["result"], syn["call_id"], True, 0, "stopped", "stopped"
+                    )
+                    out.append(syn)
+                    continue
+                try:
+                    out.append(await _run_one(tc))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.exception("Tool dispatch error: %s", tc.get("name"))
+                    out.append(
+                        {
+                            "call_id": tc.get("id") or "",
+                            "name": tc.get("name") or "",
+                            "result": f"[异常] 工具 {tc.get('name')} 分发失败: {e}",
+                            "is_error": True,
+                        }
+                    )
+            return out
+        except asyncio.CancelledError:
+            done_ids = {r.get("call_id") for r in out}
+            for r in out:
+                await self._persist_message(
+                    "tool", r["result"], tool_call_id=r.get("call_id"), name=r.get("name")
                 )
-        return out
+            for tc in tool_calls:
+                cid = tc.get("id") or ""
+                if cid in done_ids:
+                    continue
+                syn = _synth_stopped(tc)
+                await self._persist_message("tool", syn["result"], tool_call_id=cid, name=syn["name"])
+                await self._persist_tool_log(
+                    syn["name"], tc.get("args") or {}, syn["result"], cid, True, 0, "stopped", "stopped"
+                )
+            raise
 
     async def _handle_spawn_tool(self, name: str, args: dict) -> str:
         # 延迟导入避免循环

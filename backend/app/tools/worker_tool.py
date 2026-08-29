@@ -8,13 +8,13 @@ from langchain_core.tools import tool
 
 @tool
 def spawn_worker(task: str, constraints: str = "") -> str:
-    """派生后台工作型子 agent（与主 agent 同等工具权限，后台并发）。参数: task(子任务描述，必填), constraints(可选约束)。约束：仅当任务可拆为独立子任务且并行收益明显时才派生；单轮不超过2个，总并发不超过3。"""
+    """派生一个后台工人。task 必须是总目标的真子集（具体到文件或子系统），禁止把用户原话/整份工作转包。派出后主 agent 不要再做同一件事。单轮≤2，总并发≤3。"""
     return f"[占位] spawn_worker task={task[:60]}"
 
 
 @tool
 def spawn_workers(tasks: list[str], constraints: str = "") -> str:
-    """批量派生后台工作型（同 spawn_worker，支持一次派生1-2个独立子任务）。参数: tasks(任务列表 1-2 项), constraints(可选约束)。"""
+    """一次派生 1-2 个互不重叠的后台工人。每项 task 必须是不同切片，禁止互相重复或等于用户总目标。派出后主 agent 等待回投再聚合。"""
     return f"[占位] spawn_workers tasks={tasks}"
 
 
