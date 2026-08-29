@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.core.crypto import decrypt_secret, encrypt_secret, encryption_ready
+from app.core.crypto import encrypt_secret, encryption_ready
 from app.core.db import is_available, session_scope
 from app.models import AppConfig, ChatSession, Model, Provider, SubAgentRun, ToolLog, utcnow
 from app.permissions.gate import gate
@@ -24,6 +24,7 @@ from app.persist import (
 )
 from app.schemas import (
     DefaultModelBody,
+    LlmProbeBody,
     ModelCreate,
     ModelOut,
     ModelUpdate,
@@ -53,8 +54,53 @@ def _provider_out(p: Provider) -> ProviderOut:
         display_name=p.display_name,
         base_url=p.base_url,
         api_key_set=bool(p.api_key_encrypted),
+        api_key_from_env=bool(p.api_key_from_env),
+        api_key_env=p.api_key_env,
         created_at=p.created_at,
     )
+
+
+def _encrypt_api_key(plain: str) -> str:
+    text = (plain or "").strip()
+    if not text:
+        return ""
+    if not encryption_ready():
+        raise HTTPException(status_code=400, detail="ENCRYPTION_KEY 未配置或非法")
+    return encrypt_secret(text)
+
+
+async def _probe_chat(base_url: str, api_key: str, model_name: str) -> dict:
+    """对指定模型发一条 hello，失败也返回 200 + ok=false。"""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return {"ok": False, "error": "缺少 base_url", "model": model_name}
+    url = f"{base}/chat/completions" if not base.endswith("/chat/completions") else base
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 8,
+                    "temperature": 0,
+                },
+            )
+        if resp.status_code >= 400:
+            return {"ok": False, "status": resp.status_code, "error": resp.text[:500], "model": model_name}
+        data = resp.json()
+        text = ""
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except Exception:
+            text = str(data)[:200]
+        return {"ok": True, "model": model_name, "reply": text}
+    except Exception as e:
+        return {"ok": False, "error": str(e) or type(e).__name__, "model": model_name}
 
 
 def _model_out(m: Model) -> ModelOut:
@@ -275,8 +321,6 @@ async def api_list_providers():
 @router.post("/providers", response_model=ProviderOut)
 async def api_create_provider(body: ProviderCreate):
     _require_db()
-    if not encryption_ready():
-        raise HTTPException(status_code=400, detail="ENCRYPTION_KEY 未配置或非法")
     async with session_scope() as db:
         if db is None:
             raise HTTPException(status_code=503, detail="MySQL 不可用")
@@ -287,7 +331,9 @@ async def api_create_provider(body: ProviderCreate):
             provider_id=body.provider_id,
             display_name=body.display_name,
             base_url=body.base_url.rstrip("/"),
-            api_key_encrypted=encrypt_secret(body.api_key),
+            api_key_encrypted=_encrypt_api_key("" if body.api_key_from_env else body.api_key),
+            api_key_from_env=bool(body.api_key_from_env),
+            api_key_env=body.api_key_env if body.api_key_from_env else None,
         )
         db.add(p)
         await db.flush()
@@ -319,10 +365,14 @@ async def api_patch_provider(provider_id: int, body: ProviderUpdate):
             p.display_name = body.display_name
         if body.base_url is not None:
             p.base_url = body.base_url.rstrip("/")
+        if body.api_key_from_env is not None:
+            p.api_key_from_env = bool(body.api_key_from_env)
+            if not p.api_key_from_env:
+                p.api_key_env = None
+        if body.api_key_env is not None:
+            p.api_key_env = body.api_key_env
         if body.api_key is not None:
-            if not encryption_ready():
-                raise HTTPException(status_code=400, detail="ENCRYPTION_KEY 未配置或非法")
-            p.api_key_encrypted = encrypt_secret(body.api_key)
+            p.api_key_encrypted = _encrypt_api_key(body.api_key)
         await db.flush()
         return _provider_out(p)
 
@@ -349,49 +399,79 @@ async def api_delete_provider(provider_id: int):
 
 
 @router.post("/providers/{provider_id}/test")
-async def api_test_provider(provider_id: int, body: ProviderTestBody | None = None):
-    """hello 探测。失败不阻止保存（调用方自行决定）。"""
+async def api_test_provider(provider_id: int, body: ProviderTestBody):
+    """对指定模型 id（供应商侧 model 字符串）做 hello 探测。"""
     _require_db()
-    body = body or ProviderTestBody()
+    from app.core.crypto import provider_api_key
+
     async with session_scope() as db:
         if db is None:
             raise HTTPException(status_code=503, detail="MySQL 不可用")
         p = await db.get(Provider, provider_id)
         if not p:
             raise HTTPException(status_code=404, detail="provider not found")
-        model_name = body.model_id
-        if not model_name:
-            m = (await db.scalars(select(Model).where(Model.provider_id == provider_id).limit(1))).first()
-            model_name = m.model_id if m else "gpt-4o-mini"
         try:
-            api_key = decrypt_secret(p.api_key_encrypted)
+            api_key = provider_api_key(p)
         except Exception as e:
-            return {"ok": False, "error": str(e)}
-        base = p.base_url.rstrip("/")
-    url = f"{base}/chat/completions" if not base.endswith("/chat/completions") else base
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "max_tokens": 8,
-                    "temperature": 0,
-                },
-            )
-        if resp.status_code >= 400:
-            return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
-        data = resp.json()
-        text = ""
+            return {"ok": False, "error": str(e), "model": body.model_id}
+        base = p.base_url
+    return await _probe_chat(base, api_key, body.model_id)
+
+
+@router.post("/llm/probe")
+async def api_llm_probe(body: LlmProbeBody):
+    """用表单里的 base_url / 密钥探测某个模型，不必先保存。"""
+    from app.core.crypto import env_api_key, provider_api_key
+
+    api_key = body.api_key
+    env_name = body.api_key_env
+    if body.provider_id is not None:
+        _require_db()
+        async with session_scope() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="MySQL 不可用")
+            p = await db.get(Provider, body.provider_id)
+            if not p:
+                raise HTTPException(status_code=404, detail="provider not found")
+            if not env_name:
+                env_name = p.api_key_env
+            if api_key is None and not body.api_key_from_env:
+                try:
+                    api_key = provider_api_key(p)
+                except Exception as e:
+                    return {"ok": False, "error": str(e), "model": body.model_id}
+    if body.api_key_from_env:
+        api_key = env_api_key(env_name or "")
+        if not api_key:
+            return {
+                "ok": False,
+                "error": f"环境变量 {env_name or '(未填写)'} 未设置",
+                "model": body.model_id,
+            }
+    return await _probe_chat(body.base_url, api_key or "", body.model_id)
+
+
+@router.post("/models/{model_id}/test")
+async def api_test_model(model_id: int):
+    """对已保存的某一条模型做 hello 探测。"""
+    _require_db()
+    from app.core.crypto import provider_api_key
+
+    async with session_scope() as db:
+        if db is None:
+            raise HTTPException(status_code=503, detail="MySQL 不可用")
+        m = (
+            await db.scalars(select(Model).options(selectinload(Model.provider)).where(Model.id == model_id))
+        ).first()
+        if not m or not m.provider:
+            raise HTTPException(status_code=404, detail="model not found")
         try:
-            text = data["choices"][0]["message"]["content"]
-        except Exception:
-            text = str(data)[:200]
-        return {"ok": True, "model": model_name, "reply": text}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            api_key = provider_api_key(m.provider)
+        except Exception as e:
+            return {"ok": False, "error": str(e), "model": m.model_id}
+        base = m.provider.base_url
+        name = m.model_id
+    return await _probe_chat(base, api_key, name)
 
 
 @router.get("/providers/{provider_id}/models", response_model=list[ModelOut])
@@ -478,6 +558,19 @@ async def api_patch_model(model_id: int, body: ModelUpdate):
         m = (await db.scalars(select(Model).options(selectinload(Model.provider)).where(Model.id == model_id))).first()
         if not m:
             raise HTTPException(status_code=404, detail="model not found")
+        if body.model_id is not None and body.model_id != m.model_id:
+            exists = (
+                await db.scalars(
+                    select(Model).where(
+                        Model.provider_id == m.provider_id,
+                        Model.model_id == body.model_id,
+                        Model.id != model_id,
+                    )
+                )
+            ).first()
+            if exists:
+                raise HTTPException(status_code=409, detail="该供应商下 model_id 已存在")
+            m.model_id = body.model_id
         if body.display_name is not None:
             m.display_name = body.display_name
         if body.context_window is not None:

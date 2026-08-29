@@ -37,10 +37,54 @@ def test_provider_model_session_flow():
         )
         assert p.status_code == 200, p.text
         pid = p.json()["id"]
-        # hello 探测允许失败
-        t = client.post(f"/api/providers/{pid}/test", json={})
+        assert p.json()["api_key_from_env"] is False
+        assert p.json().get("api_key_env") in (None, "")
+
+        no_name = client.post(
+            "/api/providers",
+            json={
+                "provider_id": f"{slug}e",
+                "display_name": "Env Provider",
+                "base_url": "https://example.invalid/v1",
+                "api_key_from_env": True,
+            },
+        )
+        assert no_name.status_code == 422
+
+        env_p = client.post(
+            "/api/providers",
+            json={
+                "provider_id": f"{slug}e",
+                "display_name": "Env Provider",
+                "base_url": "https://example.invalid/v1",
+                "api_key_from_env": True,
+                "api_key_env": "MY_CUSTOM_KEY",
+            },
+        )
+        assert env_p.status_code == 200, env_p.text
+        assert env_p.json()["api_key_from_env"] is True
+        assert env_p.json()["api_key_env"] == "MY_CUSTOM_KEY"
+        env_pid = env_p.json()["id"]
+        env_probe = client.post(
+            "/api/llm/probe",
+            json={
+                "base_url": "https://example.invalid/v1",
+                "model_id": "demo-model",
+                "api_key_from_env": True,
+                "api_key_env": "MISSING_VAR_XYZ",
+            },
+        )
+        assert env_probe.status_code == 200
+        assert env_probe.json()["ok"] is False
+        assert "MISSING_VAR_XYZ" in (env_probe.json().get("error") or "")
+
+        missing = client.post(f"/api/providers/{pid}/test", json={})
+        assert missing.status_code == 422
+
+        t = client.post(f"/api/providers/{pid}/test", json={"model_id": "demo-model"})
         assert t.status_code == 200
         assert t.json()["ok"] is False
+        assert t.json()["model"] == "demo-model"
 
         m = client.post(
             f"/api/providers/{pid}/models",
@@ -48,6 +92,19 @@ def test_provider_model_session_flow():
         )
         assert m.status_code == 200, m.text
         mid = m.json()["id"]
+
+        mt = client.post(f"/api/models/{mid}/test")
+        assert mt.status_code == 200
+        assert mt.json()["ok"] is False
+        assert mt.json()["model"] == "demo-model"
+
+        probe = client.post(
+            "/api/llm/probe",
+            json={"base_url": "https://example.invalid/v1", "model_id": "demo-model", "api_key": "sk-unit-test"},
+        )
+        assert probe.status_code == 200
+        assert probe.json()["ok"] is False
+        assert probe.json()["model"] == "demo-model"
 
         client.put("/api/config/default-model", json={"default_model_id": mid})
         d = client.get("/api/config/default-model")
@@ -68,3 +125,4 @@ def test_provider_model_session_flow():
         client.put("/api/config/default-model", json={"default_model_id": None})
         client.delete(f"/api/models/{mid}")
         client.delete(f"/api/providers/{pid}")
+        client.delete(f"/api/providers/{env_pid}")

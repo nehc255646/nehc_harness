@@ -409,7 +409,7 @@ class SubAgentLoop:
             await self._handle_worker_finish(result, status)
 
     async def _call_model(self, messages: list[dict]) -> dict:
-        if self.executor._llm is None or getattr(self.executor, "api_key", "") in ("sk-test", "", None):
+        if self.executor._llm is None or getattr(self.executor, "demo", False):
             res = self._heuristic_fallback(messages)
             res["streamed"] = False
             return res

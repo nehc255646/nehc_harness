@@ -98,8 +98,8 @@ Vite 已把 `/api`、`/ws` 代理到 `:8000`。浏览器打开 `http://localhost
 
 ## 使用
 
-1. 打开「模型」，按供应商添加 OpenAI 兼容的 `base_url` + `api_key`，再添加模型。可用 hello 探测（失败仍可保存）。
-2. 顶栏为当前会话选择模型。未配置任何模型时走 heuristic 演示（可发「执行 echo hello」看审批）。
+1. 打开「模型」，按供应商添加 OpenAI 兼容的 `base_url` + `api_key`，再为每条模型单独测试连接（失败仍可保存）。
+2. 在对话输入框底部先选供应商再选模型；切换在下一次发送后生效。未配置任何模型时走 heuristic 演示（可发「执行 echo hello」看审批）。
 3. 非放行的 `shell` / `write` / `edit` 会弹审批：**执行一次** / **本次会话同类均执行** / **拒绝**。同类：shell 取命令前 2 个 token；其它工具按工具名。
 4. 主 agent 可派生交互型（侧栏）或工作型（底部工作区）。关侧栏 ≠ 终止子 agent。
 5. 工作目录锁定在 `WORKDIR`（默认仓库下 `workspace/`）。放行规则见 `allow_rules.yaml`。

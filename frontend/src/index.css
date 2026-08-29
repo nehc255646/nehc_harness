@@ -82,4 +82,16 @@ body {
     background: var(--color-surface);
     border-radius: 0.85rem;
   }
+  .ui-select {
+    @apply appearance-none truncate rounded-lg border bg-surface-2 py-1.5 pl-2.5 pr-7 text-xs outline-none transition;
+    border-color: var(--color-border);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7382' stroke-width='2'><path d='M6 9l6 6 6-6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.45rem center;
+    background-size: 0.85rem;
+  }
+  .ui-select:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-dim);
+  }
 }

@@ -53,16 +53,23 @@ class Executor:
     ):
         self.model = model or settings.openai_model or "gpt-4o-mini"
         self.base_url = base_url or settings.openai_base_url or None
-        self.api_key = api_key or settings.openai_api_key or "sk-test"
         self.temperature = temperature
         self.retry_count = retry_count if retry_count is not None else settings.retry_count
         self.context_window = 128000
         self.model_pk: int | None = None
         self.unresolved = unresolved
+        self.demo = False
         self._llm = None
         if unresolved:
             self.api_key = ""
+            self.demo = True
             return
+        if api_key is not None:
+            self.api_key = api_key
+            self.demo = False
+        else:
+            self.api_key = settings.openai_api_key or "sk-test"
+            self.demo = not bool(settings.openai_api_key)
         self._init_llm()
 
     @classmethod
@@ -71,7 +78,7 @@ class Executor:
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
 
-        from app.core.crypto import decrypt_secret
+        from app.core.crypto import provider_api_key
         from app.core.db import is_available, session_scope
         from app.models import ChatSession, Model
 
@@ -92,7 +99,7 @@ class Executor:
                                 if not model or not model.provider:
                                     logger.warning("session model missing: session=%s model_id=%s", session_id, sess.model_id)
                                     return cls(unresolved=True)
-                                key = decrypt_secret(model.provider.api_key_encrypted)
+                                key = provider_api_key(model.provider)
                                 inst = cls(
                                     model=model.model_id,
                                     base_url=model.provider.base_url,
@@ -115,7 +122,7 @@ class Executor:
             return
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "api_key": self.api_key,
+            "api_key": self.api_key or "no-key",
             "temperature": self.temperature,
             "streaming": True,
         }

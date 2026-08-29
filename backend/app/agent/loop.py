@@ -530,7 +530,7 @@ class AgentLoop:
     async def _call_model(self, messages: list[dict]) -> dict:
         """调用模型，支持流式，返回 {text, tool_calls, streamed}"""
         # 若 executor 未初始化或为演示 key，走 heuristic fallback (无 key 时保证 M1 可验收)
-        if self.executor._llm is None or getattr(self.executor, "api_key", "") in ("sk-test", "", None):
+        if self.executor._llm is None or getattr(self.executor, "demo", False):
             # 重置消息 id：heuristic 路径不产生流式 message，防止 tool_calls 分支复用上一轮 id 覆盖旧落库行
             self._current_message_id = None
             res = self._heuristic_fallback(messages)

@@ -31,7 +31,9 @@ class Provider(Base):
     provider_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     base_url: Mapped[str] = mapped_column(String(512), nullable=False)
-    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    api_key_from_env: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    api_key_env: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, server_default=func.now())
 
     models: Mapped[list[Model]] = relationship(back_populates="provider", cascade="all, delete-orphan")

@@ -1,6 +1,7 @@
 """Fernet 加解密 — Provider.api_key 落库"""
 
 import logging
+import os
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -30,6 +31,8 @@ def encrypt_secret(plain: str) -> str:
 
 
 def decrypt_secret(token: str) -> str:
+    if not token:
+        return ""
     try:
         return _get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
     except InvalidToken as e:
@@ -42,3 +45,23 @@ def encryption_ready() -> bool:
         return True
     except Exception:
         return False
+
+
+def env_api_key(name: str) -> str:
+    """读取指定名称的环境变量；OPENAI_API_KEY 同时回落到 settings。"""
+    key = (name or "").strip()
+    if not key:
+        return ""
+    val = (os.environ.get(key) or "").strip()
+    if val:
+        return val
+    if key == "OPENAI_API_KEY":
+        return (settings.openai_api_key or "").strip()
+    return ""
+
+
+def provider_api_key(provider) -> str:
+    """解析供应商密钥：勾选环境变量时只读配置的变量名。"""
+    if getattr(provider, "api_key_from_env", False):
+        return env_api_key(getattr(provider, "api_key_env", None) or "")
+    return decrypt_secret(getattr(provider, "api_key_encrypted", None) or "")

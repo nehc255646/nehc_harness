@@ -1,8 +1,15 @@
 """全量配置"""
 
+from pathlib import Path
 from urllib.parse import quote_plus
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 让 {PROVIDER_SLUG}_API_KEY 等未声明变量也能从 .env 读到
+_root = Path(__file__).resolve().parents[3]
+load_dotenv(_root / ".env", override=False)
+load_dotenv(_root / "backend" / ".env", override=False)
 
 
 class Settings(BaseSettings):

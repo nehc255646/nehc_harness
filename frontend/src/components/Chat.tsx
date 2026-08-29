@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore } from "../store/agentStore";
 import ApprovalModal from "./ApprovalModal";
 import { IconSend } from "./icons";
@@ -13,16 +13,81 @@ function roleLabel(role: string) {
 }
 
 export default function Chat() {
-  const { messages, toolCalls, pendingApprovals, sendMessage, sendBlockedReason, models, modelId, respondApproval, agentState } =
-    useAgentStore();
+  const {
+    messages,
+    toolCalls,
+    pendingApprovals,
+    sendMessage,
+    sendBlockedReason,
+    models,
+    modelId,
+    sessionId,
+    setSessionModel,
+    respondApproval,
+    agentState,
+  } = useAgentStore();
   const [input, setInput] = useState("");
-  const blocked = models.length > 0 && !modelId;
+  const [pickedSession, setPickedSession] = useState(sessionId);
+  const [pickedProviderId, setPickedProviderId] = useState<number | null>(null);
+  const [pickedModelId, setPickedModelId] = useState<number | null>(null);
+  const [pickerErr, setPickerErr] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const onSend = () => {
-    if (!input.trim() || blocked) return;
-    sendMessage(input.trim());
+  if (pickedSession !== sessionId) {
+    setPickedSession(sessionId);
+    setPickedProviderId(null);
+    setPickedModelId(null);
+  }
+
+  const providerOpts = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const m of models) {
+      if (!map.has(m.provider_id)) {
+        map.set(m.provider_id, m.provider_name || m.provider_slug || `供应商 ${m.provider_id}`);
+      }
+    }
+    return [...map.entries()].map(([id, name]) => ({ id, name }));
+  }, [models]);
+
+  const sessionModel = models.find((m) => m.id === modelId);
+  let draftProviderId = pickedProviderId ?? sessionModel?.provider_id ?? models[0]?.provider_id ?? null;
+  if (draftProviderId != null && !models.some((m) => m.provider_id === draftProviderId)) {
+    draftProviderId = models[0]?.provider_id ?? null;
+  }
+  const modelsForProvider = models.filter((m) => m.provider_id === draftProviderId);
+  let draftModelId = pickedModelId;
+  if (draftModelId == null || !modelsForProvider.some((m) => m.id === draftModelId)) {
+    draftModelId =
+      (sessionModel && sessionModel.provider_id === draftProviderId ? sessionModel.id : null) ??
+      modelsForProvider[0]?.id ??
+      null;
+  }
+  const blocked = models.length > 0 && !draftModelId;
+
+  const onProviderChange = (pid: number) => {
+    setPickedProviderId(pid);
+    const list = models.filter((m) => m.provider_id === pid);
+    const keep = list.find((m) => m.id === pickedModelId);
+    setPickedModelId(keep?.id ?? list[0]?.id ?? null);
+  };
+
+  const onSend = async () => {
+    const text = input.trim();
+    if (!text || blocked) return;
+    setPickerErr("");
+    if (models.length > 0) {
+      if (!draftModelId) return;
+      if (draftModelId !== modelId) {
+        try {
+          await setSessionModel(draftModelId);
+        } catch (e) {
+          setPickerErr(String(e));
+          return;
+        }
+      }
+    }
+    sendMessage(text);
     setInput("");
     if (taRef.current) taRef.current.style.height = "auto";
   };
@@ -48,7 +113,7 @@ export default function Chat() {
             </div>
             <p className="max-w-md text-sm text-muted">
               {blocked
-                ? "先在顶栏选择模型，或打开「模型」添加供应商。"
+                ? "先在输入框选择供应商和模型，或打开「模型」添加。"
                 : "给 agent 一条任务。文件写入和命令默认会先请你审批。"}
             </p>
             {!blocked && (
@@ -112,7 +177,11 @@ export default function Chat() {
             <ApprovalModal key={a.approval_id} approval={a} onRespond={respondApproval} />
           ))}
           {sendBlockedReason && <p className="mb-2 text-xs text-amber-400">{sendBlockedReason}</p>}
-          <div className="flex items-end gap-2 rounded-2xl border border-[var(--color-border)] bg-surface-2 p-2 shadow-panel focus-within:border-accent">
+          {pickerErr && <p className="mb-2 text-xs text-red-300">{pickerErr}</p>}
+          {models.length > 0 && draftModelId != null && draftModelId !== modelId && (
+            <p className="mb-2 text-[11px] text-faint">模型将于下次发送后切换</p>
+          )}
+          <div className="rounded-2xl border border-[var(--color-border)] bg-surface-2 p-2 shadow-panel focus-within:border-accent">
             <textarea
               ref={taRef}
               rows={1}
@@ -124,16 +193,52 @@ export default function Chat() {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  onSend();
+                  void onSend();
                 }
               }}
-              placeholder={blocked ? "请先选择模型..." : "输入任务，Enter 发送，Shift+Enter 换行"}
+              placeholder={blocked ? "请先选择供应商和模型..." : "输入任务，Enter 发送，Shift+Enter 换行"}
               disabled={blocked}
-              className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-faint disabled:opacity-50"
+              className="max-h-40 min-h-[40px] w-full resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-faint disabled:opacity-50"
             />
-            <button onClick={onSend} disabled={blocked || !input.trim()} className="ui-btn-primary h-10 w-10 shrink-0 rounded-xl p-0">
-              <IconSend />
-            </button>
+            <div className="flex items-center gap-2 px-1 pb-0.5 pt-1">
+              <select
+                className="ui-select min-w-0 max-w-[42%] flex-1"
+                aria-label="AI 供应商"
+                title="供应商"
+                value={draftProviderId ?? ""}
+                onChange={(e) => onProviderChange(Number(e.target.value))}
+              >
+                {providerOpts.length === 0 && <option value="">演示模式</option>}
+                {providerOpts.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="ui-select min-w-0 max-w-[42%] flex-1"
+                aria-label="AI 模型"
+                title="模型"
+                value={draftModelId ?? ""}
+                disabled={providerOpts.length === 0}
+                onChange={(e) => setPickedModelId(e.target.value ? Number(e.target.value) : null)}
+              >
+                {modelsForProvider.length === 0 && <option value="">{models.length ? "选择模型…" : "演示模式"}</option>}
+                {modelsForProvider.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void onSend()}
+                disabled={blocked || !input.trim()}
+                className="ui-btn-primary ml-auto h-9 w-9 shrink-0 rounded-xl p-0"
+                aria-label="发送"
+              >
+                <IconSend />
+              </button>
+            </div>
           </div>
         </div>
       </div>

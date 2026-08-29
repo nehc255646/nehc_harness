@@ -27,9 +27,6 @@ export default function App() {
   const {
     boot,
     connectionState,
-    models,
-    modelId,
-    setSessionModel,
     refreshModels,
     agentState,
     stopAgent,
@@ -81,18 +78,6 @@ export default function App() {
             <div className="hidden sm:block">
               <AccentPicker />
             </div>
-            <select
-              className="ui-input max-w-[8.5rem] shrink-0 py-1.5 text-xs sm:max-w-52"
-              value={modelId ?? ""}
-              onChange={(e) => setSessionModel(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">{models.length ? "选择模型…" : "演示模式（无模型）"}</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name} ({m.provider_name})
-                </option>
-              ))}
-            </select>
             <button
               onClick={() => setSettingsOpen(true)}
               className="ui-btn-ghost shrink-0 whitespace-nowrap px-2"

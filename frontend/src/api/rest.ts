@@ -34,7 +34,11 @@ export type ProviderRow = {
   display_name: string;
   base_url: string;
   api_key_set: boolean;
+  api_key_from_env: boolean;
+  api_key_env?: string | null;
 };
+
+export type LlmProbeResult = { ok: boolean; error?: string; reply?: string; model?: string; status?: number };
 
 export type HistoryMessage = {
   id: number;
@@ -94,21 +98,62 @@ export const rest = {
   messages: (id: string) => fetch(`/api/sessions/${id}/messages`).then(json) as Promise<HistoryMessage[]>,
   toolLogs: (id: string) => fetch(`/api/sessions/${id}/tool-logs`).then(json) as Promise<ToolLogRow[]>,
   providers: () => fetch("/api/providers").then(json) as Promise<ProviderRow[]>,
-  createProvider: (body: { provider_id: string; display_name: string; base_url: string; api_key: string }) =>
+  createProvider: (body: {
+    provider_id: string;
+    display_name: string;
+    base_url: string;
+    api_key?: string;
+    api_key_from_env?: boolean;
+    api_key_env?: string | null;
+  }) =>
     fetch("/api/providers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json) as Promise<ProviderRow>,
-  testProvider: (id: number, model_id?: string) =>
-    fetch(`/api/providers/${id}/test`, {
+  patchProvider: (
+    id: number,
+    body: Partial<{
+      display_name: string;
+      base_url: string;
+      api_key: string;
+      api_key_from_env: boolean;
+      api_key_env: string | null;
+    }>,
+  ) =>
+    fetch(`/api/providers/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json) as Promise<ProviderRow>,
+  probeLlm: (body: {
+    base_url: string;
+    model_id: string;
+    api_key?: string | null;
+    api_key_from_env?: boolean;
+    api_key_env?: string | null;
+    provider_id?: number | null;
+    provider_slug?: string;
+  }) =>
+    fetch("/api/llm/probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model_id: model_id || null }),
-    }).then(json) as Promise<{ ok: boolean; error?: string; reply?: string }>,
+      body: JSON.stringify(body),
+    }).then(json) as Promise<LlmProbeResult>,
+  testModel: (id: number) =>
+    fetch(`/api/models/${id}/test`, { method: "POST" }).then(json) as Promise<LlmProbeResult>,
   createModel: (providerId: number, body: { model_id: string; display_name: string; context_window?: number; temperature?: number }) =>
     fetch(`/api/providers/${providerId}/models`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json) as Promise<ModelRow>,
+  patchModel: (
+    id: number,
+    body: Partial<{ model_id: string; display_name: string; context_window: number; temperature: number }>,
+  ) =>
+    fetch(`/api/models/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json) as Promise<ModelRow>,

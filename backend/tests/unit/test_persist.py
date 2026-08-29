@@ -33,6 +33,31 @@ async def test_encrypt_roundtrip():
     token = encrypt_secret("sk-test-secret")
     assert token != "sk-test-secret"
     assert decrypt_secret(token) == "sk-test-secret"
+    assert decrypt_secret("") == ""
+
+
+def test_env_api_key(monkeypatch):
+    from app.core.crypto import env_api_key, provider_api_key
+
+    monkeypatch.setenv("MY_CUSTOM_KEY", "from-name")
+    assert env_api_key("MY_CUSTOM_KEY") == "from-name"
+    assert env_api_key("") == ""
+    assert env_api_key("MISSING_VAR_XYZ") == ""
+
+    class P:
+        provider_id = "opencode_zen"
+        api_key_from_env = True
+        api_key_env = "MY_CUSTOM_KEY"
+        api_key_encrypted = ""
+
+    assert provider_api_key(P()) == "from-name"
+
+    class Direct:
+        api_key_from_env = False
+        api_key_env = None
+        api_key_encrypted = ""
+
+    assert provider_api_key(Direct()) == ""
 
 
 async def test_save_and_load_history(db_ready):
