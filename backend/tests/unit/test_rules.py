@@ -75,15 +75,12 @@ def test_allowlist_requires_every_segment():
     assert is_shell_prefix_allowed("git status && git log") is True
 
 
-def test_session_allowlist_requires_every_segment():
-    rules = [{"kind": "shell_prefix", "pattern": "ls"}]
-    assert is_session_shell_allowed("ls -la", rules) is True
+def test_session_allow_matches_leading_prefix_not_every_segment():
+    rules = [{"kind": "shell_prefix", "pattern": "echo"}]
+    assert is_session_shell_allowed("echo hello", rules) is True
+    assert is_session_shell_allowed('echo "=== 网络 ===" && (ip -brief addr 2>/)', rules) is True
     assert is_session_shell_allowed("ls; echo pwned", rules) is False
-    rules2 = [
-        {"kind": "shell_prefix", "pattern": "ls"},
-        {"kind": "shell_prefix", "pattern": "echo"},
-    ]
-    assert is_session_shell_allowed("ls; echo pwned", rules2) is True
+    assert is_session_shell_allowed("uname && echo hi", rules) is False
 
 
 def test_blacklist_path_qualified_rm():

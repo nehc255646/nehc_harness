@@ -69,6 +69,14 @@ def _all_segments_prefix_allowed(command: str, prefixes: list[str]) -> bool:
     return all(_segment_matches_prefix(sub, prefixes) for sub in segs)
 
 
+def _leading_prefix_allowed(command: str, prefixes: list[str]) -> bool:
+    """整条命令的开头命中前缀即可（会话「同类」：前 2 token）。"""
+    cmd = (command or "").strip()
+    if not cmd or not prefixes:
+        return False
+    return _segment_matches_prefix(cmd, prefixes)
+
+
 def is_shell_prefix_allowed(command: str) -> bool:
     """检查是否命中 allow_rules.yaml 的 allow_shell 前缀"""
     return _all_segments_prefix_allowed(command, get_allow_shell_prefixes())
@@ -178,7 +186,7 @@ def is_blacklisted(command: str) -> tuple[bool, str | None]:
 # ---------- 会话级规则 ----------
 
 def is_session_shell_allowed(command: str, session_rules: list[dict]) -> bool:
-    """检查是否命中会话放行规则 (kind=shell_prefix)"""
+    """会话同类：按整条命令前缀匹配（与写入时的前 2 token 一致）。"""
     prefixes = []
     for rule in session_rules:
         if rule.get("kind") != "shell_prefix":
@@ -186,7 +194,7 @@ def is_session_shell_allowed(command: str, session_rules: list[dict]) -> bool:
         pat = (rule.get("pattern") or "").strip()
         if pat:
             prefixes.append(pat)
-    return _all_segments_prefix_allowed(command, prefixes)
+    return _leading_prefix_allowed(command, prefixes)
 
 
 def is_session_tool_allowed(tool_name: str, session_rules: list[dict]) -> bool:

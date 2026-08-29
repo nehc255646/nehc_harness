@@ -71,3 +71,21 @@ def test_path_rm_blocked_even_after_ls():
     decision, _, need = check_policy("shell", {"command": "ls; /bin/rm -rf /tmp/x"}, [])
     assert decision == "blocked"
     assert need is False
+
+
+def test_session_similar_covers_chained_echo():
+    rules = [{"kind": "shell_prefix", "pattern": "echo"}]
+    decision, _, need = check_policy(
+        "shell",
+        {"command": 'echo "=== 网络 ===" && (ip -brief addr 2>/)'},
+        rules,
+    )
+    assert decision == "session_allow"
+    assert need is False
+
+
+def test_session_similar_still_blacklists_rm():
+    rules = [{"kind": "shell_prefix", "pattern": "echo"}]
+    decision, _, need = check_policy("shell", {"command": "echo hi && /bin/rm -rf /tmp/x"}, rules)
+    assert decision == "blocked"
+    assert need is False
