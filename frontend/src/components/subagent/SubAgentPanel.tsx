@@ -1,9 +1,15 @@
-/** 交互型子 agent 侧栏面板 — 对话记录/迟到标记/收起（关闭仅收起 UI，不终止） */
+/** 交互型子 agent 侧栏 — 有任务时才出现；关闭仅收起 UI，不终止 */
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "../../store/agentStore";
-import { IconClose, IconSend } from "../icons";
+import { IconChevron, IconClose, IconSend } from "../icons";
 
-export default function SubAgentPanel() {
+export default function SubAgentPanel({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
   const { subPanels, dismissedPanels, sendSubagentMessage, dismissPanel } = useAgentStore();
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const visible = subPanels.filter((p) => !dismissedPanels.includes(p.subagent_id));
@@ -13,13 +19,36 @@ export default function SubAgentPanel() {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [subPanels]);
 
-  if (visible.length === 0) return null;
+  if (!open || visible.length === 0) return null;
+
+  const hideCard = (id: string) => {
+    dismissPanel(id);
+    if (visible.length <= 1) onClose();
+  };
 
   return (
-    <aside className="hidden w-80 shrink-0 flex-col gap-3 overflow-y-auto border-l border-[var(--color-border)] bg-surface p-3 lg:flex">
-      <h3 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-faint">
-        子 Agent · {visible.length}
-      </h3>
+    <>
+      <button
+        type="button"
+        aria-label="关闭子 agent 面板"
+        className="fixed inset-0 z-30 bg-black/50 lg:hidden"
+        onClick={onClose}
+      />
+    <aside className="fixed inset-y-0 right-0 z-40 flex w-[min(20rem,92vw)] flex-col gap-3 overflow-y-auto border-l border-[var(--color-border)] bg-surface p-3 shadow-xl lg:static lg:z-auto lg:w-80 lg:shrink-0 lg:shadow-none">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-faint">
+          交互子 Agent · {visible.length}
+        </h3>
+        <button
+          type="button"
+          onClick={onClose}
+          title="收起面板（不终止子 agent）"
+          aria-label="收起子 agent 面板"
+          className="rounded-md p-1 text-faint hover:bg-surface-2 hover:text-white"
+        >
+          <IconChevron className="h-4 w-4" />
+        </button>
+      </div>
       {visible.map((p) => (
         <div key={p.subagent_id} className="rounded-xl border border-[var(--color-border)] bg-surface-2 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -42,8 +71,8 @@ export default function SubAgentPanel() {
                 {p.status}
               </span>
               <button
-                onClick={() => dismissPanel(p.subagent_id)}
-                title="收起面板（不终止子 agent）"
+                onClick={() => hideCard(p.subagent_id)}
+                title="收起此卡片（不终止子 agent）"
                 className="rounded-md p-1 text-faint hover:bg-black/30 hover:text-white"
               >
                 <IconClose className="h-3.5 w-3.5" />
@@ -98,5 +127,6 @@ export default function SubAgentPanel() {
         </div>
       ))}
     </aside>
+    </>
   );
 }

@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { wsClient } from "../api/ws";
 import { useAgentStore } from "../store/agentStore";
-import { IconBolt, IconPlus, IconTrash } from "./icons";
+import { IconBolt, IconChevron, IconPlus, IconTrash } from "./icons";
 
 function shortTime(iso?: string) {
   if (!iso) return "";
@@ -12,19 +12,42 @@ function shortTime(iso?: string) {
 
 export default function SessionSidebar({
   mobileOpen,
+  collapsed,
   onClose,
+  onToggleCollapsed,
 }: {
   mobileOpen: boolean;
+  collapsed: boolean;
   onClose: () => void;
+  onToggleCollapsed: () => void;
 }) {
-  const { sessionId, sessionRows, deleteSession, renameSession, agentState } = useAgentStore();
+  const { sessionId, sessionRows, deleteSession, renameSession, agentState, messages, toolCalls } =
+    useAgentStore();
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [createHint, setCreateHint] = useState("");
+  const rail = collapsed && !mobileOpen;
+  const alreadyNew = messages.length === 0 && toolCalls.length === 0;
+
+  useEffect(() => {
+    if (!createHint) return;
+    const t = window.setTimeout(() => setCreateHint(""), 2200);
+    return () => window.clearTimeout(t);
+  }, [createHint]);
 
   const commit = async (id: string) => {
     const title = draft.trim();
     setEditing(null);
     if (title) await renameSession(id, title);
+  };
+
+  const onCreateSession = () => {
+    if (alreadyNew) {
+      setCreateHint("已在新对话中");
+      return;
+    }
+    setCreateHint("");
+    wsClient.send("session.create", { title: "New Session" });
   };
 
   return (
@@ -37,30 +60,83 @@ export default function SessionSidebar({
         />
       )}
     <aside
-      className={`w-64 shrink-0 flex-col border-r border-[var(--color-border)] bg-surface ${
-        mobileOpen ? "fixed inset-y-0 left-0 z-40 flex md:static" : "hidden md:flex"
-      }`}
+      className={`shrink-0 flex-col border-r border-[var(--color-border)] bg-surface transition-[width] duration-200 ${
+        mobileOpen ? "fixed inset-y-0 left-0 z-40 flex w-64 md:static md:z-auto" : "hidden md:flex"
+      } ${rail ? "md:w-14" : "w-64"}`}
     >
-      <div className="flex items-center gap-2.5 px-4 py-4">
-        <div className="grid h-8 w-8 place-items-center rounded-lg bg-accent-dim text-accent">
-          <IconBolt className="h-4 w-4" />
-        </div>
-        <div className="min-w-0">
-          <div className="text-sm font-semibold tracking-tight">Harness</div>
-          <div className="text-[11px] text-faint">coding agent</div>
-        </div>
+      <div className={`flex items-center py-4 ${rail ? "flex-col gap-2 px-2" : "gap-2.5 px-3"}`}>
+        {rail ? (
+          <button
+            type="button"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-dim text-accent"
+            title="展开会话列表"
+            onClick={onToggleCollapsed}
+          >
+            <IconBolt className="h-4 w-4" />
+          </button>
+        ) : (
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-dim text-accent">
+            <IconBolt className="h-4 w-4" />
+          </div>
+        )}
+        {!rail && (
+          <>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold tracking-tight">Harness</div>
+              <div className="text-[11px] text-faint">coding agent</div>
+            </div>
+            <button
+              type="button"
+              className="hidden rounded-md p-1 text-faint hover:bg-surface-2 hover:text-white md:inline-flex"
+              title="收起会话列表"
+              aria-label="收起会话列表"
+              onClick={onToggleCollapsed}
+            >
+              <IconChevron className="h-4 w-4 rotate-180" />
+            </button>
+          </>
+        )}
       </div>
 
-      <div className="px-3 pb-3">
+      <div className={`relative pb-3 ${rail ? "px-2" : "px-3"}`}>
         <button
-          onClick={() => wsClient.send("session.create", { title: "New Session" })}
-          className="ui-btn-primary w-full"
+          type="button"
+          onClick={onCreateSession}
+          className={rail ? "ui-btn-primary h-9 w-full p-0" : "ui-btn-primary w-full"}
+          title={alreadyNew ? "已在新对话中" : "新建会话"}
+          aria-label={alreadyNew ? "已在新对话中" : "新建会话"}
         >
           <IconPlus className="h-4 w-4" />
-          新建会话
+          {!rail && "新建会话"}
         </button>
+        {createHint && (
+          <p
+            role="status"
+            className={
+              rail
+                ? "absolute left-full top-1 z-50 ml-2 whitespace-nowrap rounded-md border border-[var(--color-border)] bg-surface-2 px-2 py-1 text-[11px] text-muted shadow-lg"
+                : "mt-2 text-center text-[11px] text-faint"
+            }
+          >
+            {createHint}
+          </p>
+        )}
       </div>
 
+      {rail ? (
+        <div className="mt-auto px-2 pb-3">
+          <button
+            type="button"
+            className="grid h-9 w-full place-items-center rounded-lg text-faint hover:bg-surface-2 hover:text-white"
+            title="展开会话列表"
+            aria-label="展开会话列表"
+            onClick={onToggleCollapsed}
+          >
+            <IconChevron className="h-4 w-4" />
+          </button>
+        </div>
+      ) : (
+      <>
       <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
         {sessionRows.length === 0 && (
           <p className="px-2 py-6 text-center text-xs text-faint">还没有会话</p>
@@ -120,6 +196,8 @@ export default function SessionSidebar({
         })}
       </div>
       <p className="border-t border-[var(--color-border)] px-4 py-2 text-[10px] text-faint">双击标题可重命名</p>
+      </>
+      )}
     </aside>
     </>
   );

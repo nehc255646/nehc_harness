@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { rest, type ModelRow, type ProviderRow } from "../api/rest";
-import { IconClose, IconPlus, IconSettings, IconTrash } from "./icons";
+import { IconCheck, IconClose, IconPlus, IconSettings, IconTrash } from "./icons";
 
 type DraftModel = {
   key: string;
@@ -95,6 +95,7 @@ export default function ModelSettings({
   const [baseline, setBaseline] = useState("");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   const dirty = snapshot(draft) !== baseline;
   const modelCount = useMemo(() => {
@@ -151,6 +152,7 @@ export default function ModelSettings({
           setBaseline(snapshot(d));
         }
         setErr("");
+        setSaved(false);
       } catch (e) {
         if (!cancelled) setErr(String(e));
       }
@@ -160,12 +162,21 @@ export default function ModelSettings({
     };
   }, [open]);
 
+  const showSaved = saved && !dirty && !saving;
+
+  useEffect(() => {
+    if (!showSaved) return;
+    const t = window.setTimeout(() => setSaved(false), 2500);
+    return () => window.clearTimeout(t);
+  }, [showSaved]);
+
   if (!open) return null;
 
   const switchTo = async (next: number | "new") => {
     if (next === selected) return;
     if (dirty && !window.confirm("有未保存的更改，切换将丢弃。继续？")) return;
     setErr("");
+    setSaved(false);
     if (next === "new") {
       const d = emptyDraft();
       setSelected("new");
@@ -183,6 +194,11 @@ export default function ModelSettings({
 
   const save = async () => {
     setErr("");
+    setSaved(false);
+    if (!dirty && draft.pk != null) {
+      setSaved(true);
+      return;
+    }
     const slug = draft.provider_id.trim();
     const name = draft.display_name.trim();
     const url = draft.base_url.trim();
@@ -236,8 +252,10 @@ export default function ModelSettings({
       }
       onChanged();
       await reload(pk);
+      setSaved(true);
     } catch (e) {
       setErr(String(e));
+      setSaved(false);
     } finally {
       setSaving(false);
     }
@@ -361,6 +379,11 @@ export default function ModelSettings({
 
           <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-4 sm:px-7">
             {err && <p className="mb-3 rounded-lg bg-red-950/40 px-3 py-2 text-xs text-red-300">{err}</p>}
+            {showSaved && !err && (
+              <p role="status" className="mb-3 rounded-lg bg-accent-dim px-3 py-2 text-xs text-accent">
+                已保存
+              </p>
+            )}
 
             <label className="mb-1 block text-sm font-medium">供应商 ID</label>
             <input
@@ -506,8 +529,22 @@ export default function ModelSettings({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] px-5 py-3 sm:px-7">
-            <button className="ui-btn-primary min-w-[5.5rem]" disabled={saving} onClick={save}>
-              {saving ? "保存中…" : "保存"}
+            <button
+              className="ui-btn-primary min-w-[5.5rem]"
+              disabled={saving}
+              onClick={save}
+              aria-live="polite"
+            >
+              {saving ? (
+                "保存中…"
+              ) : showSaved ? (
+                <>
+                  <IconCheck className="h-4 w-4" />
+                  已保存
+                </>
+              ) : (
+                "保存"
+              )}
             </button>
             <button
               className="ui-btn-ghost border-red-500/30 text-red-300 hover:bg-red-950/40 hover:text-red-200"

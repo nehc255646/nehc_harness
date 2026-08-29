@@ -6,7 +6,17 @@ import SessionSidebar from "./components/SessionSidebar";
 import SubAgentPanel from "./components/subagent/SubAgentPanel";
 import WorkerStatus from "./components/subagent/WorkerStatus";
 import AccentPicker from "./components/AccentPicker";
-import { IconMenu, IconSettings, IconStop } from "./components/icons";
+import { IconMenu, IconPanelRight, IconSettings, IconStop } from "./components/icons";
+
+const SIDEBAR_KEY = "harness.sessionSidebarCollapsed";
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -33,19 +43,38 @@ export default function App() {
     sessionTitle,
     sessionId,
     sessionRows,
+    subPanels,
+    subPanelOpen,
+    restorePanels,
+    setSubPanelOpen,
   } = useAgentStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const busy = agentState === "running" || agentState === "awaiting_approval";
   const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Agent Harness";
+  const subCount = subPanels.length;
 
   useEffect(() => {
     boot();
   }, [boot]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarCollapsed]);
+
   return (
     <div className="flex h-screen overflow-hidden bg-bg text-[var(--color-text)]">
-      <SessionSidebar mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <SessionSidebar
+        mobileOpen={sidebarOpen}
+        collapsed={sidebarCollapsed}
+        onClose={() => setSidebarOpen(false)}
+        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+      />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] bg-surface/80 px-3 backdrop-blur sm:px-4">
           <div className="flex min-w-0 items-center gap-2">
@@ -78,6 +107,26 @@ export default function App() {
             <div className="hidden sm:block">
               <AccentPicker />
             </div>
+            {subCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (subPanelOpen) {
+                    setSubPanelOpen(false);
+                  } else {
+                    restorePanels();
+                    setSubPanelOpen(true);
+                  }
+                }}
+                className={`ui-btn-ghost shrink-0 whitespace-nowrap px-2 ${subPanelOpen ? "text-accent" : ""}`}
+                title={subPanelOpen ? "收起交互子 agent" : "打开交互子 agent"}
+                aria-pressed={subPanelOpen}
+              >
+                <IconPanelRight className="h-4 w-4" />
+                <span className="hidden sm:inline">子 Agent</span>
+                <span className="rounded-full bg-accent-dim px-1.5 text-[10px] text-accent">{subCount}</span>
+              </button>
+            )}
             <button
               onClick={() => setSettingsOpen(true)}
               className="ui-btn-ghost shrink-0 whitespace-nowrap px-2"
@@ -98,7 +147,7 @@ export default function App() {
           <div className="min-w-0 flex-1 overflow-hidden">
             <Chat />
           </div>
-          <SubAgentPanel />
+          <SubAgentPanel open={subPanelOpen} onClose={() => setSubPanelOpen(false)} />
         </div>
         <WorkerStatus />
       </div>

@@ -52,11 +52,14 @@ type State = {
   sendBlockedReason: string;
   subPanels: SubPanel[];
   dismissedPanels: string[];
+  subPanelOpen: boolean;
   workers: WorkerItem[];
   sendMessage: (content: string) => void;
   sendSubagentMessage: (subagent_id: string, content: string) => void;
   respondApproval: (approval_id: string, decision: "approve" | "approve_similar" | "reject") => void;
   dismissPanel: (subagent_id: string) => void;
+  restorePanels: () => void;
+  setSubPanelOpen: (open: boolean) => void;
   stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
   boot: () => Promise<void>;
@@ -114,6 +117,8 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         pendingApprovals: Array.isArray(p.pending_approvals) ? (p.pending_approvals as Approval[]) : [],
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
         subPanels: merged,
+        dismissedPanels: switched ? [] : s.dismissedPanels,
+        subPanelOpen: merged.length > 0 && (switched || s.subPanelOpen),
         workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
         agentState: (p.agent_state as AgentState) || s.agentState,
       };
@@ -321,6 +326,8 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
           ...s.subPanels.filter((x) => x.subagent_id !== panel.subagent_id),
           { ...panel, messages: [] },
         ],
+        dismissedPanels: s.dismissedPanels.filter((id) => id !== panel.subagent_id),
+        subPanelOpen: true,
       }));
     }
   });
@@ -372,6 +379,7 @@ export const useAgentStore = create<State>((set, get) => ({
   sendBlockedReason: "",
   subPanels: [],
   dismissedPanels: [],
+  subPanelOpen: false,
   workers: [],
 
   connect: (sessionId) => {
@@ -488,11 +496,13 @@ export const useAgentStore = create<State>((set, get) => ({
     wsClient.send("subagent.response", { session_id: sid, subagent_id, content });
   },
   dismissPanel: (subagent_id) => {
-    // 仅收起 UI，不终止子 agent（PLAN §2.4）
+    // 仅收起 UI，不终止子 agent
     set((s) => ({
       dismissedPanels: s.dismissedPanels.includes(subagent_id) ? s.dismissedPanels : [...s.dismissedPanels, subagent_id],
     }));
   },
+  restorePanels: () => set({ dismissedPanels: [], subPanelOpen: true }),
+  setSubPanelOpen: (open) => set({ subPanelOpen: open }),
   stopWorker: (subagent_id) => {
     wsClient.send("agent.stop", { agent_id: subagent_id });
   },
