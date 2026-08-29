@@ -28,6 +28,40 @@ async def test_enqueue_wakes_done_agent():
     await ag.stop()
 
 
+async def test_midrun_user_message_injected_after_current_node():
+    """工作中发来的用户消息在本轮工具结束后写入历史，下一轮模型能看到（与子 agent 回投同队列）。"""
+    ag = AgentLoop("ut_inject")
+    seen: list[list[str]] = []
+
+    async def fake_call(messages):
+        users = [str(m.get("content") or "") for m in messages if m.get("role") == "user"]
+        seen.append(users)
+        if len(seen) == 1:
+            await ag.queue.put({"type": "user_message", "content": "改用 python"})
+            return {
+                "text": "先看文件",
+                "tool_calls": [{"name": "glob", "args": {"pattern": "*"}, "id": "c1"}],
+                "streamed": False,
+            }
+        return {"text": "好", "tool_calls": [], "streamed": False}
+
+    async def fake_dispatch(tool_calls):
+        return [{"call_id": tc.get("id") or "", "name": tc.get("name") or "", "result": "ok"} for tc in tool_calls]
+
+    ag._call_model = fake_call  # type: ignore[method-assign]
+    ag._dispatch_tools = fake_dispatch  # type: ignore[method-assign]
+    await ag.enqueue({"type": "user_message", "content": "写代码"})
+    for _ in range(200):
+        await asyncio.sleep(0.02)
+        if ag.state == "idle" and len(seen) >= 2:
+            break
+    assert len(seen) >= 2, f"应进入第二轮, seen={seen}"
+    assert any("写代码" in u for u in seen[0])
+    assert not any("改用 python" in u for u in seen[0])
+    assert any("改用 python" in u for u in seen[1])
+    await ag.stop()
+
+
 async def test_emit_message_record_flag():
     """record=False 不入 history（tool_calls 路径由 assistant_msg 统一回填，避免重复）"""
     ag = AgentLoop("ut_emit")
@@ -53,6 +87,21 @@ async def test_heuristic_tool_call_text_not_duplicated():
     assert assistant_texts, "应有 assistant 回复"
     assert len(assistant_texts) == len(set(assistant_texts)), f"文本重复: {assistant_texts}"
     await ag.stop()
+
+
+async def test_open_interactive_for_user_reuses_running():
+    """用户再次呼出时复用运行中的交互型，不另开一个"""
+
+    async def noop_enqueue(_ev):
+        return None
+
+    sid = "ut_open_reuse"
+    first = await sa.open_interactive_for_user(sid, [], None, None, noop_enqueue, lambda _sid: None)
+    assert first.startswith("sub_")
+    second = await sa.open_interactive_for_user(sid, [], None, None, noop_enqueue, lambda _sid: None)
+    assert second == first
+    await sa.stop_session_subagents(sid)
+    await asyncio.sleep(0.2)
 
 
 async def test_stop_interactive_subagent():

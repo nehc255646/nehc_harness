@@ -60,6 +60,7 @@ type State = {
   dismissPanel: (subagent_id: string) => void;
   restorePanels: () => void;
   setSubPanelOpen: (open: boolean) => void;
+  toggleSubAgent: () => void;
   stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
   boot: () => Promise<void>;
@@ -118,7 +119,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         sessionAllowRules: Array.isArray(p.session_allow_rules) ? (p.session_allow_rules as State["sessionAllowRules"]) : [],
         subPanels: merged,
         dismissedPanels: switched ? [] : s.dismissedPanels,
-        subPanelOpen: merged.length > 0 && (switched || s.subPanelOpen),
+        subPanelOpen: switched ? false : s.subPanelOpen,
         workers: Array.isArray(p.workers) ? (p.workers as WorkerItem[]) : s.workers,
         agentState: (p.agent_state as AgentState) || s.agentState,
       };
@@ -327,7 +328,6 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
           { ...panel, messages: [] },
         ],
         dismissedPanels: s.dismissedPanels.filter((id) => id !== panel.subagent_id),
-        subPanelOpen: true,
       }));
     }
   });
@@ -503,6 +503,18 @@ export const useAgentStore = create<State>((set, get) => ({
   },
   restorePanels: () => set({ dismissedPanels: [], subPanelOpen: true }),
   setSubPanelOpen: (open) => set({ subPanelOpen: open }),
+  toggleSubAgent: () => {
+    const s = get();
+    if (s.subPanelOpen) {
+      set({ subPanelOpen: false });
+      return;
+    }
+    set({ dismissedPanels: [], subPanelOpen: true });
+    const running = s.subPanels.some((p) => p.status === "running");
+    if (!running) {
+      wsClient.send("subagent.open", { session_id: s.sessionId });
+    }
+  },
   stopWorker: (subagent_id) => {
     wsClient.send("agent.stop", { agent_id: subagent_id });
   },

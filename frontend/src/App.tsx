@@ -45,8 +45,8 @@ export default function App() {
     sessionRows,
     subPanels,
     subPanelOpen,
-    restorePanels,
     setSubPanelOpen,
+    toggleSubAgent,
   } = useAgentStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -107,26 +107,19 @@ export default function App() {
             <div className="hidden sm:block">
               <AccentPicker />
             </div>
-            {subCount > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (subPanelOpen) {
-                    setSubPanelOpen(false);
-                  } else {
-                    restorePanels();
-                    setSubPanelOpen(true);
-                  }
-                }}
-                className={`ui-btn-ghost shrink-0 whitespace-nowrap px-2 ${subPanelOpen ? "text-accent" : ""}`}
-                title={subPanelOpen ? "收起交互子 agent" : "打开交互子 agent"}
-                aria-pressed={subPanelOpen}
-              >
-                <IconPanelRight className="h-4 w-4" />
-                <span className="hidden sm:inline">子 Agent</span>
+            <button
+              type="button"
+              onClick={() => toggleSubAgent()}
+              className={`ui-btn-ghost shrink-0 whitespace-nowrap px-2 ${subPanelOpen ? "text-accent" : ""}`}
+              title={subPanelOpen ? "收起交互子 agent" : "打开交互子 agent"}
+              aria-pressed={subPanelOpen}
+            >
+              <IconPanelRight className="h-4 w-4" />
+              <span className="hidden sm:inline">子 Agent</span>
+              {subCount > 0 && (
                 <span className="rounded-full bg-accent-dim px-1.5 text-[10px] text-accent">{subCount}</span>
-              </button>
-            )}
+              )}
+            </button>
             <button
               onClick={() => setSettingsOpen(true)}
               className="ui-btn-ghost shrink-0 whitespace-nowrap px-2"

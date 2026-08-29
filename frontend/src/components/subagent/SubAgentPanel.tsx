@@ -1,4 +1,4 @@
-/** 交互型子 agent 侧栏 — 有任务时才出现；关闭仅收起 UI，不终止 */
+/** 交互型子 agent 侧栏 — 用户从顶栏呼出；关闭仅收起 UI，不终止 */
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "../../store/agentStore";
 import { IconChevron, IconClose, IconSend } from "../icons";
@@ -19,7 +19,7 @@ export default function SubAgentPanel({
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [subPanels]);
 
-  if (!open || visible.length === 0) return null;
+  if (!open) return null;
 
   const hideCard = (id: string) => {
     dismissPanel(id);
@@ -37,7 +37,7 @@ export default function SubAgentPanel({
     <aside className="fixed inset-y-0 right-0 z-40 flex w-[min(20rem,92vw)] flex-col gap-3 overflow-y-auto border-l border-[var(--color-border)] bg-surface p-3 shadow-xl lg:static lg:z-auto lg:w-80 lg:shrink-0 lg:shadow-none">
       <div className="flex items-center justify-between gap-2 px-1">
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-faint">
-          交互子 Agent · {visible.length}
+          交互子 Agent{visible.length ? ` · ${visible.length}` : ""}
         </h3>
         <button
           type="button"
@@ -49,6 +49,9 @@ export default function SubAgentPanel({
           <IconChevron className="h-4 w-4" />
         </button>
       </div>
+      {visible.length === 0 && (
+        <p className="px-1 text-xs text-faint">正在打开侧栏对话…</p>
+      )}
       {visible.map((p) => (
         <div key={p.subagent_id} className="rounded-xl border border-[var(--color-border)] bg-surface-2 p-3">
           <div className="flex items-center justify-between gap-2">

@@ -787,6 +787,34 @@ async def spawn_interactive(
     return f"[已派生交互型子 agent] id={subagent_id} 任务: {task_desc} — 侧栏已打开，等待用户对话，完成后将自动回投主 agent。"
 
 
+async def open_interactive_for_user(
+    session_id: str,
+    main_history: list[dict],
+    summary: str | None,
+    broadcaster,
+    main_enqueue,
+    manager_get,
+) -> str:
+    """用户从顶栏呼出交互型侧栏。已有运行中的则复用，否则新开。成功返回 subagent_id，失败返回 [拒绝]/[错误]。"""
+    running = [p for p in get_panels(session_id) if p.get("status") == "running"]
+    if running:
+        return running[0]["subagent_id"]
+    msg = await spawn_interactive(
+        session_id,
+        "用户侧栏对话",
+        "与用户对话；需要时调用 finish_subagent 将摘要回投主 agent",
+        main_history,
+        summary,
+        broadcaster,
+        main_enqueue,
+        manager_get,
+    )
+    if msg.startswith(("[拒绝]", "[错误]")):
+        return msg
+    running = [p for p in get_panels(session_id) if p.get("status") == "running"]
+    return running[0]["subagent_id"] if running else msg
+
+
 async def spawn_worker_batch(
     session_id: str,
     tasks: list[str],

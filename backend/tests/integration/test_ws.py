@@ -95,6 +95,19 @@ def test_ws_reconnect_keeps_session_allow_rules():
             assert any(r.get("kind") == "shell_prefix" and "echo" in (r.get("pattern") or "") for r in rules)
 
 
+def test_ws_user_opens_interactive():
+    """交互型由用户 WS 呼出，不经主 agent 工具"""
+    session_id = f"it_{uuid.uuid4().hex[:8]}"
+    with TestClient(app) as client, client.websocket_connect(f"/ws?session_id={session_id}") as ws:
+        _recv_until(ws, "session.hello")
+        ws.send_json({"event": "subagent.open", "payload": {}})
+        opened = _recv_until(ws, "subagent.opened")
+        assert opened.get("kind") == "interactive"
+        sid = str(opened.get("subagent_id", ""))
+        assert sid.startswith("sub_")
+        ws.send_json({"event": "agent.stop", "payload": {"agent_id": sid}})
+
+
 def test_ws_duplicate_approval_errors():
     session_id = f"it_{uuid.uuid4().hex[:8]}"
     with TestClient(app) as client, client.websocket_connect(f"/ws?session_id={session_id}") as ws:

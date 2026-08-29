@@ -214,12 +214,11 @@ class AgentLoop:
                     await persist_mod.flush_pending()
                 except Exception:
                     logger.debug("flush_pending failed", exc_info=True)
-                # 1. drain 队列 (阻塞等待下一事件，若 idle)
+                # 1. drain 队列：空闲则阻塞等下一事件；当前节点（一轮模型+工具）结束后再把积压的
+                # 用户消息 / 子 agent 回投写进历史，供下一轮模型看到（不打断本轮）
                 if not self.history or self.state == "idle":
-                    # idle 时阻塞等待
                     try:
                         event = await self.queue.get()
-                        # 若收到 stop 信号，直接退出
                         if self._stop_event.is_set():
                             break
                         await self._handle_incoming(event)
@@ -228,16 +227,7 @@ class AgentLoop:
                     except Exception:
                         logger.exception("Queue handling failed")
                         continue
-                    else:
-                        # 非 idle：drain 所有积压事件 (非阻塞)
-                        drained = []
-                        while not self.queue.empty():
-                            try:
-                                drained.append(self.queue.get_nowait())
-                            except asyncio.QueueEmpty:
-                                break
-                        for ev in drained:
-                            await self._handle_incoming(ev)
+                await self._drain_pending()
 
                 # 队列内 stop 事件：清理已完成，直接退出主循环
                 if self._stop_event.is_set():
@@ -377,6 +367,19 @@ class AgentLoop:
             logger.exception("AgentLoop crashed")
             await self._set_state("error")
             await self._broadcast("error", {"code": ErrorCode.INTERNAL, "message": str(e)})
+
+    async def _drain_pending(self) -> None:
+        """非阻塞取出积压事件，写入历史。遇 stop 后不再处理后续。"""
+        drained: list[dict] = []
+        while not self.queue.empty():
+            try:
+                drained.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for ev in drained:
+            if self._stop_event.is_set():
+                break
+            await self._handle_incoming(ev)
 
     async def _handle_incoming(self, event: dict):
         etype = event.get("type")
@@ -647,10 +650,12 @@ class AgentLoop:
             }
 
         # 启发式规则：根据用户输入生成演示 tool_calls（派生优先，避免被 shell 吞）
-        if "spawn_subagent" in last_user_lower or "派生交互" in last_user_lower:
+        if "spawn_subagent" in last_user_lower or "派生交互" in last_user_lower or (
+            "子 agent" in last_user_lower and "spawn" not in last_user_lower and "工作" not in last_user_lower
+        ):
             return {
-                "text": "准备派生交互型子 agent：",
-                "tool_calls": [{"name": "spawn_subagent", "args": {"behavior_desc": "与用户确认需求", "goal": last_user[:200]}, "id": str(uuid.uuid4())}],
+                "text": "交互型子 agent 请从顶栏「子 Agent」打开，不会由主对话自动派生。",
+                "tool_calls": [],
             }
         if "spawn_workers" in last_user_lower:
             return {
@@ -661,12 +666,6 @@ class AgentLoop:
             return {
                 "text": "准备派生后台工作型：",
                 "tool_calls": [{"name": "spawn_worker", "args": {"task": last_user[:200]}, "id": str(uuid.uuid4())}],
-            }
-        # 子 agent 通用关键词需在 spawn_workers 之后，避免批量被单条吞
-        if "子 agent" in last_user_lower and "spawn" not in last_user_lower:
-            return {
-                "text": "准备派生交互型子 agent：",
-                "tool_calls": [{"name": "spawn_subagent", "args": {"behavior_desc": "与用户确认需求", "goal": last_user[:200]}, "id": str(uuid.uuid4())}],
             }
         if "批量" in last_user_lower:
             return {
@@ -858,7 +857,7 @@ class AgentLoop:
         # 延迟导入避免循环
         try:
             from app.agent.manager import manager
-            from app.agent.subagent import spawn_interactive, spawn_worker_batch
+            from app.agent.subagent import spawn_worker_batch
         except Exception as e:
             return f"[错误] 子 agent 模块未就绪: {e}"
         # 获取主 agent 唤醒入口与 broadcaster（传 enqueue 而非裸 queue，保证终态后回投可唤醒）
@@ -877,13 +876,7 @@ class AgentLoop:
                 f"本轮已派生 {self._turn_spawned}，再请求 {requested}"
             )
         if name == "spawn_subagent":
-            behavior_desc = args.get("behavior_desc") or args.get("behavior") or ""
-            goal = args.get("goal") or args.get("task") or ""
-            if not behavior_desc and not goal:
-                return "[错误] spawn_subagent 需提供 behavior_desc 或 goal"
-            return await spawn_interactive(
-                self.session_id, behavior_desc, goal, self.history, self.summary, broadcaster, self.enqueue, manager.get
-            )
+            return "[拒绝] 交互型子 agent 需由用户从顶栏打开，主 agent 不能派生"
         elif name == "spawn_worker":
             task = args.get("task") or ""
             constraints = args.get("constraints") or ""

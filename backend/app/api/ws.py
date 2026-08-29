@@ -187,6 +187,35 @@ async def ws_endpoint(ws: WebSocket):
                 # 广播到被删会话的连接（而非当前连接所在会话）
                 await broadcast(sid, "session.deleted", {"session_id": sid})
 
+            elif event == "subagent.open":
+                try:
+                    from app.agent.subagent import open_interactive_for_user
+
+                    target = await manager.get_or_create(session_id)
+                    target.set_broadcaster(_loop_broadcaster)
+                    result = await open_interactive_for_user(
+                        session_id,
+                        target.history,
+                        target.summary,
+                        _loop_broadcaster,
+                        target.enqueue,
+                        manager.get,
+                    )
+                    if result.startswith(("[拒绝]", "[错误]")):
+                        await ws.send_text(
+                            json.dumps(
+                                {"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": result}},
+                                ensure_ascii=False,
+                            )
+                        )
+                except Exception as e:
+                    await ws.send_text(
+                        json.dumps(
+                            {"event": "error", "payload": {"code": ErrorCode.INTERNAL, "message": str(e)}},
+                            ensure_ascii=False,
+                        )
+                    )
+
             elif event == "subagent.response":
                 subagent_id = payload.get("subagent_id", "")
                 content = payload.get("content", "")

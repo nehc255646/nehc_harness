@@ -4,7 +4,6 @@ from langchain_core.tools import tool
 
 from app.tools.files import edit, glob, grep, read, write
 from app.tools.shell import shell
-from app.tools.subagent_tool import spawn_subagent
 from app.tools.worker_tool import spawn_worker, spawn_workers
 
 # finish_task 为 agent 级工具，由 loop 特殊处理，但也注册为 tool 供模型调用
@@ -16,7 +15,7 @@ def finish_task(message: str = "任务完成") -> str:
 
 
 # 汇总 — 供 ChatOpenAI.bind_tools
-TOOLS = [read, write, edit, glob, grep, shell, finish_task, spawn_subagent, spawn_worker, spawn_workers]
+TOOLS = [read, write, edit, glob, grep, shell, finish_task, spawn_worker, spawn_workers]
 PLAN_TOOLS = [read, glob, grep, finish_task]
 
 # 名称到工具的映射，用于执行分发
