@@ -141,7 +141,13 @@ async def api_create_session(body: SessionCreate):
     model_id = body.model_id
     if model_id is None:
         model_id = await resolve_default_model_id()
-    row = await ensure_session(sid, title=body.title or "New Session", model_id=model_id, assign_default=False)
+    row = await ensure_session(
+        sid,
+        title=body.title or "New Session",
+        model_id=model_id,
+        assign_default=False,
+        work_mode=body.work_mode,
+    )
     if row is None:
         raise HTTPException(status_code=500, detail="创建会话失败")
     from app.agent.manager import manager
@@ -177,12 +183,15 @@ async def api_patch_session(session_id: str, body: SessionUpdate):
             if body.status not in ("active", "archived", "deleted"):
                 raise HTTPException(status_code=400, detail="非法 status")
             row.status = body.status
-        if "model_id" in body.model_dump(exclude_unset=True):
+        dumped = body.model_dump(exclude_unset=True)
+        if "model_id" in dumped:
             if body.model_id is not None:
                 model = await db.get(Model, body.model_id)
                 if not model:
                     raise HTTPException(status_code=400, detail="模型不存在")
             row.model_id = body.model_id
+        if "work_mode" in dumped and body.work_mode is not None:
+            row.work_mode = body.work_mode
         row.updated_at = utcnow()
         await db.flush()
         out = SessionOut.model_validate(row)
@@ -191,7 +200,10 @@ async def api_patch_session(session_id: str, body: SessionUpdate):
 
     agent = manager.get(session_id)
     if agent is not None:
-        agent.executor = await Executor.from_session_id(session_id)
+        if "model_id" in body.model_dump(exclude_unset=True):
+            agent.executor = await Executor.from_session_id(session_id)
+        if out.work_mode:
+            agent.set_work_mode(out.work_mode)
     return out
 
 

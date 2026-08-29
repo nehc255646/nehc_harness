@@ -72,6 +72,7 @@ class ChatSession(Base):
     model_id: Mapped[int | None] = mapped_column(
         ForeignKey("models.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    work_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="auto", server_default="auto")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, server_default=func.now(), index=True)

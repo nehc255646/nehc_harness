@@ -17,9 +17,21 @@ def finish_task(message: str = "任务完成") -> str:
 
 # 汇总 — 供 ChatOpenAI.bind_tools
 TOOLS = [read, write, edit, glob, grep, shell, finish_task, spawn_subagent, spawn_worker, spawn_workers]
+PLAN_TOOLS = [read, glob, grep, finish_task]
 
 # 名称到工具的映射，用于执行分发
 TOOL_MAP = {t.name: t for t in TOOLS}
 
 # 只读工具集 (与 policy 保持一致)
 READONLY_TOOLS = {"read", "glob", "grep"}
+WORK_MODES = ("auto", "plan")
+SPAWN_TOOLS = {"spawn_subagent", "spawn_worker", "spawn_workers"}
+
+
+def normalize_work_mode(value: str | None) -> str:
+    mode = (value or "auto").strip().lower()
+    return mode if mode in WORK_MODES else "auto"
+
+
+def tools_for_work_mode(mode: str):
+    return PLAN_TOOLS if normalize_work_mode(mode) == "plan" else TOOLS

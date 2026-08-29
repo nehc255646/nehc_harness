@@ -8,11 +8,14 @@ const json = async (res: Response) => {
   return res.json();
 };
 
+export type WorkMode = "auto" | "plan";
+
 export type SessionRow = {
   id: string;
   title: string;
   status: string;
   model_id: number | null;
+  work_mode?: WorkMode;
   created_at: string;
   updated_at: string;
 };
@@ -88,7 +91,7 @@ export const rest = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title || "New Session", model_id: model_id ?? null }),
     }).then(json) as Promise<SessionRow>,
-  patchSession: (id: string, body: Partial<Pick<SessionRow, "title" | "model_id" | "status">>) =>
+  patchSession: (id: string, body: Partial<Pick<SessionRow, "title" | "model_id" | "status" | "work_mode">>) =>
     fetch(`/api/sessions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },

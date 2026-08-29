@@ -11,6 +11,7 @@ A personal, single-machine, single-user, multi-session web coding agent. The mai
 ## Features
 
 - Streaming main chat, tool-call cards, line-level diffs for write/edit
+- Work modes Auto (executable) / Plan (read-only planning) in the composer; Plan uses its own system prompt and read-only tools
 - Permission gate: blacklist, config allowlist, session “allow similar”, first-time approval
 - Interactive sub-agents: sidebar conversation; a summary is posted back to the main agent
 - Worker sub-agents: background concurrency, same tools as the main agent, batched results (max 2 per turn, 3 concurrent total)
@@ -99,7 +100,7 @@ Vite proxies `/api` and `/ws` to `:8000`. Open `http://localhost:5173`.
 ## Usage
 
 1. Open **Models**, add an OpenAI-compatible provider (`base_url` + `api_key`), then test each model individually (failure does not block save).
-2. In the composer, pick a provider then a model; the change applies on the next send. With no models configured, heuristic demo mode is used (try `执行 echo hello` / `run echo hello` to hit approval).
+2. In the composer, switch Auto / Plan, then pick a provider and a model. Auto is the current executable mode; Plan is read-only (research and write a plan — no writes, shell, or sub-agents). Model changes apply on the next send. With no models configured, heuristic demo mode is used (try `执行 echo hello` / `run echo hello` to hit approval).
 3. Non-allowlisted `shell` / `write` / `edit` prompts: **once** / **allow similar this session** / **reject**. “Similar” for shell is the first two tokens; for other tools it is the tool name.
 4. The main agent can spawn interactive (sidebar) or worker (bottom bar) sub-agents. Closing a panel does not stop the sub-agent.
 5. The working directory is locked to `WORKDIR` (default `workspace/` in the repo). Persistent allow rules live in `allow_rules.yaml`.

@@ -109,12 +109,14 @@ class ModelOut(BaseModel):
 class SessionCreate(BaseModel):
     title: str | None = Field(default=None, max_length=256)
     model_id: int | None = None
+    work_mode: str = Field(default="auto", pattern="^(auto|plan)$")
 
 
 class SessionUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=256)
     model_id: int | None = None
     status: str | None = None
+    work_mode: str | None = Field(default=None, pattern="^(auto|plan)$")
 
 
 class SessionOut(BaseModel):
@@ -122,6 +124,7 @@ class SessionOut(BaseModel):
     title: str
     status: str
     model_id: int | None
+    work_mode: str = "auto"
     created_at: datetime
     updated_at: datetime
 

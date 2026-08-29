@@ -4,7 +4,8 @@ import ApprovalModal from "./ApprovalModal";
 import { IconSend } from "./icons";
 import ToolCallCard from "./ToolCallCard";
 
-const EXAMPLES = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello harness"];
+const EXAMPLES_AUTO = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello harness"];
+const EXAMPLES_PLAN = ["阅读工作区结构", "说明当前代码如何启动", "给出下一步实现计划"];
 
 function roleLabel(role: string) {
   if (role === "user") return "你";
@@ -23,6 +24,8 @@ export default function Chat() {
     modelId,
     sessionId,
     setSessionModel,
+    setSessionWorkMode,
+    workMode,
     respondApproval,
     agentState,
   } = useAgentStore();
@@ -114,11 +117,13 @@ export default function Chat() {
             <p className="max-w-md text-sm text-muted">
               {blocked
                 ? "先在输入框选择供应商和模型，或打开「模型」添加。"
-                : "给 agent 一条任务。文件写入和命令默认会先请你审批。"}
+                : workMode === "plan"
+                  ? "Plan 模式只读：先调研再给计划，不会改文件或执行命令。"
+                  : "Auto 模式：给 agent 一条任务。文件写入和命令默认会先请你审批。"}
             </p>
             {!blocked && (
               <div className="mt-6 flex flex-wrap justify-center gap-2">
-                {EXAMPLES.map((ex) => (
+                {(workMode === "plan" ? EXAMPLES_PLAN : EXAMPLES_AUTO).map((ex) => (
                   <button
                     key={ex}
                     onClick={() => {
@@ -178,6 +183,9 @@ export default function Chat() {
           ))}
           {sendBlockedReason && <p className="mb-2 text-xs text-amber-400">{sendBlockedReason}</p>}
           {pickerErr && <p className="mb-2 text-xs text-red-300">{pickerErr}</p>}
+          {workMode === "plan" && (
+            <p className="mb-2 text-[11px] text-amber-400/90">Plan 模式：只读调研，不会改文件或执行命令</p>
+          )}
           {models.length > 0 && draftModelId != null && draftModelId !== modelId && (
             <p className="mb-2 text-[11px] text-faint">模型将于下次发送后切换</p>
           )}
@@ -196,11 +204,39 @@ export default function Chat() {
                   void onSend();
                 }
               }}
-              placeholder={blocked ? "请先选择供应商和模型..." : "输入任务，Enter 发送，Shift+Enter 换行"}
+              placeholder={
+                blocked
+                  ? "请先选择供应商和模型..."
+                  : workMode === "plan"
+                    ? "描述要规划的任务，Enter 发送"
+                    : "输入任务，Enter 发送，Shift+Enter 换行"
+              }
               disabled={blocked}
               className="max-h-40 min-h-[40px] w-full resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-faint disabled:opacity-50"
             />
             <div className="flex items-center gap-2 px-1 pb-0.5 pt-1">
+              <div className="ui-seg shrink-0" role="group" aria-label="工作模式">
+                <button
+                  type="button"
+                  className={workMode === "auto" ? "is-active" : ""}
+                  title="Auto：可改文件与执行命令（需审批）"
+                  onClick={() => {
+                    if (workMode !== "auto") void setSessionWorkMode("auto").catch((e) => setPickerErr(String(e)));
+                  }}
+                >
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  className={workMode === "plan" ? "is-active is-plan" : ""}
+                  title="Plan：只读调研，只输出计划"
+                  onClick={() => {
+                    if (workMode !== "plan") void setSessionWorkMode("plan").catch((e) => setPickerErr(String(e)));
+                  }}
+                >
+                  Plan
+                </button>
+              </div>
               <select
                 className="ui-select min-w-0 max-w-[42%] flex-1"
                 aria-label="AI 供应商"

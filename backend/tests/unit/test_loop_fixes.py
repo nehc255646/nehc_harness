@@ -4,6 +4,8 @@ import asyncio
 
 from app.agent import subagent as sa
 from app.agent.loop import AgentLoop
+from app.agent.prompts import PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT
+from app.tools.registry import PLAN_TOOLS, TOOLS
 
 
 def _force_heuristic(agent: AgentLoop) -> None:
@@ -129,3 +131,48 @@ async def test_worker_single_batch_completes_and_cleans():
     assert got, "batch_done 应回投主 agent 队列"
     assert got[0]["type"] == "worker_batch_done"
     assert got[0]["payload"]["workers"][0]["subagent_id"] == wid
+
+
+def test_system_prompt_switches_with_work_mode():
+    ag = AgentLoop("ut_sys")
+    ag.history = [{"role": "user", "content": "hi"}]
+    auto_msgs = ag._build_messages()
+    assert auto_msgs[0]["role"] == "system"
+    assert auto_msgs[0]["content"] == SYSTEM_PROMPT
+    assert "当前工作模式是 auto" in auto_msgs[0]["content"]
+    ag.set_work_mode("plan")
+    plan_msgs = ag._build_messages()
+    assert plan_msgs[0]["content"] == PLAN_SYSTEM_PROMPT
+    assert "当前工作模式是 plan" in plan_msgs[0]["content"]
+    assert plan_msgs[0]["content"] != SYSTEM_PROMPT
+    assert ag._bound_tools() == PLAN_TOOLS
+    ag.set_work_mode("auto")
+    assert ag._bound_tools() == TOOLS
+
+
+def test_heuristic_plan_does_not_emit_shell():
+    ag = AgentLoop("ut_plan_h")
+    ag.set_work_mode("plan")
+    res = ag._heuristic_fallback([{"role": "user", "content": "执行 echo hello"}])
+    assert res["tool_calls"] == []
+    assert "plan" in res["text"]
+
+
+async def test_plan_mode_blocks_spawn_dispatch():
+    ag = AgentLoop("ut_plan_spawn")
+    ag.set_work_mode("plan")
+    out = await ag._dispatch_tools(
+        [{"id": "c1", "name": "spawn_worker", "args": {"task": "x"}}]
+    )
+    assert out[0]["is_error"] is True
+    assert "plan" in out[0]["result"]
+
+
+async def test_plan_mode_blocks_write_dispatch():
+    ag = AgentLoop("ut_plan_write")
+    ag.set_work_mode("plan")
+    out = await ag._dispatch_tools(
+        [{"id": "c2", "name": "write", "args": {"path": "a.txt", "content": "x"}}]
+    )
+    assert out[0]["is_error"] is True
+    assert "plan" in out[0]["result"]

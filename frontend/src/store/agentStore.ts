@@ -8,6 +8,7 @@ import {
   type ModelRow,
   type SessionRow,
   type ToolLogRow,
+  type WorkMode,
 } from "../api/rest";
 import { wsClient } from "../api/ws";
 
@@ -44,6 +45,7 @@ type State = {
   sessionId: string;
   sessionTitle: string;
   modelId: number | null;
+  workMode: WorkMode;
   sessionRows: SessionRow[];
   models: ModelRow[];
   sendBlockedReason: string;
@@ -60,6 +62,7 @@ type State = {
   refreshSessions: () => Promise<void>;
   refreshModels: () => Promise<void>;
   setSessionModel: (modelId: number | null) => Promise<void>;
+  setSessionWorkMode: (mode: WorkMode) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   stopAgent: () => void;
@@ -102,6 +105,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         sessionId: sid2,
         sessionTitle: (p.title as string) || s.sessionTitle,
         modelId: (p.model_id as number | null) ?? null,
+        workMode: p.work_mode === "plan" ? "plan" : "auto",
         messages: switched
           ? []
           : s.messages.map((m) => ({ ...m, streaming: Boolean(m.streaming && live) })),
@@ -345,6 +349,7 @@ export const useAgentStore = create<State>((set, get) => ({
   sessionId: "",
   sessionTitle: "",
   modelId: null,
+  workMode: "auto",
   sessionRows: [],
   models: [],
   sendBlockedReason: "",
@@ -404,6 +409,17 @@ export const useAgentStore = create<State>((set, get) => ({
     const row = await rest.patchSession(sid, { model_id: modelId });
     set({ modelId: row.model_id, sendBlockedReason: "" });
     await get().refreshSessions();
+  },
+
+  setSessionWorkMode: async (mode) => {
+    const sid = get().sessionId;
+    if (!sid) return;
+    const row = await rest.patchSession(sid, { work_mode: mode });
+    const next: WorkMode = row.work_mode === "plan" ? "plan" : "auto";
+    set((s) => ({
+      workMode: next,
+      sessionRows: s.sessionRows.map((r) => (r.id === sid ? { ...r, work_mode: next } : r)),
+    }));
   },
 
   renameSession: async (id, title) => {

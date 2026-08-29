@@ -20,13 +20,13 @@ from app.agent.context import (
     window_slice,
 )
 from app.agent.executor import Executor
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT
 from app.core import rtstore
 from app.core.config import settings
 from app.core.errors import ErrorCode
 from app.permissions.gate import gate
 from app.permissions.policy import check_policy
-from app.tools.registry import TOOL_MAP, TOOLS
+from app.tools.registry import SPAWN_TOOLS, TOOL_MAP, normalize_work_mode, tools_for_work_mode
 
 # M2 子 agent 依赖延迟导入，避免循环
 
@@ -62,11 +62,21 @@ class AgentLoop:
         self._turn_spawned: int = 0
         # 摘要合并失败后的重试冷却（避免每轮空转调 LLM）
         self._summary_retry_after: float = 0.0
+        self.work_mode: str = "auto"
 
     # ---------- 对外接口 ----------
 
     def set_broadcaster(self, fn: Callable):
         self.broadcaster = fn
+
+    def set_work_mode(self, mode: str | None) -> None:
+        self.work_mode = normalize_work_mode(mode)
+
+    def _system_prompt(self) -> str:
+        return PLAN_SYSTEM_PROMPT if self.work_mode == "plan" else SYSTEM_PROMPT
+
+    def _bound_tools(self):
+        return tools_for_work_mode(self.work_mode)
 
     async def enqueue(self, event: dict):
         await self.queue.put(event)
@@ -117,6 +127,12 @@ class AgentLoop:
         if late_runs:
             logger.info("Fed back %d late subagent results for session=%s", len(late_runs), self.session_id)
         self.executor = await Executor.from_session_id(self.session_id)
+        try:
+            row = await persist_mod.get_session(self.session_id)
+            if row is not None:
+                self.set_work_mode(getattr(row, "work_mode", None))
+        except Exception:
+            logger.debug("hydrate work_mode failed", exc_info=True)
 
     def _ensure_running(self):
         if self._task is None or self._task.done():
@@ -405,7 +421,7 @@ class AgentLoop:
     def _build_messages(self) -> list[dict]:
         # 滑动窗口最近 N 个 turn（window_slice 吸附 tool 组边界）
         _slid, window = window_slice(self.history, settings.window_n)
-        return build_messages(SYSTEM_PROMPT, self.summary, window, [])
+        return build_messages(self._system_prompt(), self.summary, window, [])
 
     async def _persist_message(
         self,
@@ -545,7 +561,7 @@ class AgentLoop:
         tool_calls_acc: dict[int, dict] = {}
 
         try:
-            async for chunk in self.executor.astream_with_retry(messages, TOOLS):
+            async for chunk in self.executor.astream_with_retry(messages, self._bound_tools()):
                 # chunk 可能是 AIMessageChunk
                 delta = getattr(chunk, "content", "") or ""
                 if delta:
@@ -555,7 +571,7 @@ class AgentLoop:
         except Exception as e:
             # 若流式失败，尝试非流式
             logger.warning("Stream failed, fallback to ainvoke: %s", e)
-            result = await self.executor.ainvoke(messages, TOOLS)
+            result = await self.executor.ainvoke(messages, self._bound_tools())
             text = getattr(result, "content", "") or ""
             if text:
                 text_parts = [text]
@@ -609,6 +625,20 @@ class AgentLoop:
             return {"text": f"已收到批量回投：{last_user[:200]}", "tool_calls": []}
         if last_user.startswith(("[交互型", "[迟到")):
             return {"text": "已知交互结果", "tool_calls": []}
+
+        if self.work_mode == "plan":
+            if "read" in last_user_lower or "读取" in last_user_lower or "glob" in last_user_lower or "grep" in last_user_lower or "列出" in last_user_lower:
+                return {
+                    "text": "plan 模式：先只读查看工作区。",
+                    "tool_calls": [{"name": "glob", "args": {"pattern": "**/*"}, "id": str(uuid.uuid4())}],
+                }
+            return {
+                "text": (
+                    f"当前为 plan 模式（只读）。针对「{last_user[:80]}」不会改文件或执行命令。"
+                    "请先用只读工具调研，或切到底栏 Auto 后再执行。"
+                ),
+                "tool_calls": [],
+            }
 
         # 启发式规则：根据用户输入生成演示 tool_calls（派生优先，避免被 shell 吞）
         if "spawn_subagent" in last_user_lower or "派生交互" in last_user_lower:
@@ -707,9 +737,14 @@ class AgentLoop:
                     await self._persist_tool_log(name, args, result, call_id, False, 0, "config_allow")
                     return {"call_id": call_id, "name": name, "result": result, "is_error": False}
 
-                # M2 spawn_* 直接处理（不走 policy）
-                if name in ("spawn_subagent", "spawn_worker", "spawn_workers"):
+                # M2 spawn_* 直接处理（不走 policy）；plan 模式禁止派生
+                if name in SPAWN_TOOLS:
                     await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})
+                    if self.work_mode == "plan":
+                        result = f"[拒绝] plan 模式只读，禁止 {name} (decision=blocked)"
+                        await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                        await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", result)
+                        return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                     result = await self._handle_spawn_tool(name, args)
                     # spawn 结果是否需要截断
                     result = truncate_tool_result(str(result), settings.max_tool_result_tokens)
@@ -720,7 +755,9 @@ class AgentLoop:
 
                 # 1. policy 判定
                 session_rules = gate.get_session_rules(self.session_id)
-                decision, reason, needs_approval = check_policy(name, args, session_rules)
+                decision, reason, needs_approval = check_policy(
+                    name, args, session_rules, work_mode=self.work_mode
+                )
 
                 if decision == "blocked":
                     await self._broadcast("tool.start", {"call_id": call_id, "name": name, "args": args})

@@ -114,7 +114,17 @@ def test_provider_model_session_flow():
         assert s.status_code == 200, s.text
         # 新建会话应解析兜底模型
         assert s.json()["model_id"] == mid
+        assert s.json().get("work_mode", "auto") == "auto"
         sid = s.json()["id"]
+
+        patched = client.patch(f"/api/sessions/{sid}", json={"work_mode": "plan"})
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["work_mode"] == "plan"
+        got = client.get(f"/api/sessions/{sid}")
+        assert got.json()["work_mode"] == "plan"
+        bad = client.patch(f"/api/sessions/{sid}", json={"work_mode": "hacker"})
+        assert bad.status_code == 422
+        client.patch(f"/api/sessions/{sid}", json={"work_mode": "auto"})
 
         hist = client.get(f"/api/sessions/{sid}/messages")
         assert hist.status_code == 200

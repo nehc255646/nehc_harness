@@ -78,6 +78,7 @@ async def ensure_session(
     title: str | None = None,
     model_id: int | None = None,
     assign_default: bool = False,
+    work_mode: str | None = None,
 ) -> ChatSession | None:
     if not is_available():
         return None
@@ -98,13 +99,23 @@ async def ensure_session(
                 title=title or "New Session",
                 status="active",
                 model_id=resolved,
+                work_mode=(work_mode if work_mode in ("auto", "plan") else "auto"),
             )
             db.add(row)
             await db.flush()
             return row
     except Exception as e:
         logger.warning("ensure_session failed: %s", e)
-        _enqueue_pending("ensure_session", {"session_id": session_id, "title": title, "model_id": model_id, "assign_default": assign_default})
+        _enqueue_pending(
+            "ensure_session",
+            {
+                "session_id": session_id,
+                "title": title,
+                "model_id": model_id,
+                "assign_default": assign_default,
+                "work_mode": work_mode,
+            },
+        )
         return None
 
 
@@ -145,7 +156,7 @@ async def update_session_fields(session_id: str, **fields: Any) -> ChatSession |
         if not row:
             return None
         for k, v in fields.items():
-            if k in ("title", "model_id", "status", "summary") and hasattr(row, k):
+            if k in ("title", "model_id", "status", "summary", "work_mode") and hasattr(row, k):
                 setattr(row, k, v)
         row.updated_at = utcnow()
         await db.flush()
@@ -646,6 +657,7 @@ async def flush_pending() -> int:
                     title=item.payload.get("title"),
                     model_id=item.payload.get("model_id"),
                     assign_default=item.payload.get("assign_default", False),
+                    work_mode=item.payload.get("work_mode"),
                 )
             ok += 1
         except Exception as e:

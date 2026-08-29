@@ -19,11 +19,19 @@ from app.permissions.rules import (
 from app.tools.registry import READONLY_TOOLS
 
 
-def check_policy(tool_name: str, args: dict, session_rules: list[dict]) -> tuple[str, str, bool]:
+def check_policy(
+    tool_name: str,
+    args: dict,
+    session_rules: list[dict],
+    work_mode: str = "auto",
+) -> tuple[str, str, bool]:
     """
     返回 (decision, reason, needs_approval)
     decision ∈ {blocked, config_allow, session_allow, need_approval}
     """
+    if work_mode == "plan" and tool_name not in READONLY_TOOLS:
+        return "blocked", f"plan 模式只读，禁止 {tool_name}", False
+
     # 提取 shell 命令 (若是 shell 工具)
     command = ""
     if tool_name == "shell":

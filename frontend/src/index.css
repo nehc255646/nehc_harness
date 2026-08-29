@@ -94,4 +94,23 @@ body {
     border-color: var(--color-accent);
     box-shadow: 0 0 0 3px var(--color-accent-dim);
   }
+  .ui-seg {
+    @apply inline-flex overflow-hidden rounded-lg border text-xs;
+    border-color: var(--color-border);
+  }
+  .ui-seg button {
+    @apply px-2.5 py-1.5 text-muted transition;
+  }
+  .ui-seg button:hover {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+  .ui-seg button.is-active {
+    background: var(--color-accent-dim);
+    color: var(--color-accent);
+  }
+  .ui-seg button.is-active.is-plan {
+    background: rgba(251, 191, 36, 0.16);
+    color: #fbbf24;
+  }
 }

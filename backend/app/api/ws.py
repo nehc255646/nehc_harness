@@ -261,6 +261,7 @@ async def _send_hello(ws: WebSocket, session_id: str, agent):
         workers = []
     title = "Session " + session_id[:8]
     model_id = None
+    work_mode = getattr(agent, "work_mode", None) or "auto"
     try:
         from app import persist as persist_mod
 
@@ -268,6 +269,8 @@ async def _send_hello(ws: WebSocket, session_id: str, agent):
         if row:
             title = row.title
             model_id = row.model_id
+            work_mode = getattr(row, "work_mode", None) or work_mode
+            agent.set_work_mode(work_mode)
     except Exception as e:
         logger.debug("hello session lookup failed: %s", e)
     await ws.send_text(
@@ -278,6 +281,7 @@ async def _send_hello(ws: WebSocket, session_id: str, agent):
                     "session_id": session_id,
                     "title": title,
                     "model_id": model_id,
+                    "work_mode": work_mode,
                     "agent_state": agent.state,
                     "pending_approvals": pending,
                     "session_allow_rules": session_rules,
