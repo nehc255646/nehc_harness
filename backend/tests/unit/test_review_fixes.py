@@ -145,6 +145,7 @@ async def test_interactive_history_no_double_append(monkeypatch):
     sa._session_index.setdefault("ut_dedup_int", set()).add("sub_d1")
     task = asyncio.create_task(loop.run())
     try:
+        await loop.enqueue_user("hello")
         for _ in range(100):
             await asyncio.sleep(0.05)
             if sa._subagents["sub_d1"].status != "running":

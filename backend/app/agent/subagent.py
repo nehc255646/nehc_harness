@@ -231,12 +231,8 @@ class SubAgentLoop:
                 self.task, self.behavior_desc, self.summary, self.snapshot
             )
             return
-        hist = list(self.snapshot)
-        if self.behavior_desc:
-            hist.append({"role": "user", "content": f"[行为描述] {self.behavior_desc}"})
-        if self.task:
-            hist.append({"role": "user", "content": f"[任务] {self.task}"})
-        self.history = hist
+        # 交互型只带主对话快照作背景；不注入假 user 消息，等侧栏真实输入再调模型
+        self.history = list(self.snapshot)
 
     def _effective_work_mode(self) -> str:
         if self.manager_get:
@@ -304,31 +300,44 @@ class SubAgentLoop:
             except Exception as e:
                 logger.debug("Cleanup subagent shell group failed: %s", e)
 
+    def _drain_interactive_user(self) -> bool:
+        got = False
+        while not self.queue.empty():
+            try:
+                ev = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if ev.get("type") == "user_message":
+                self.history.append({"role": "user", "content": ev.get("content", "")})
+                got = True
+        return got
+
+    async def _await_interactive_user(self) -> bool:
+        """每轮调模型前必须先有侧栏用户消息。首轮无限等；之后空闲超时收敛。"""
+        while True:
+            rec = _subagents.get(self.subagent_id)
+            if rec and rec.status != "running":
+                return False
+            if self._drain_interactive_user():
+                return True
+            try:
+                if self._round == 0:
+                    ev = await self.queue.get()
+                else:
+                    ev = await asyncio.wait_for(self.queue.get(), timeout=_INTERACTIVE_IDLE_TIMEOUT)
+            except TimeoutError:
+                await self._finish("done", "[空闲超时] 用户未继续对话，交互型子 agent 自动收敛")
+                return False
+            if ev.get("type") == "user_message":
+                self.history.append({"role": "user", "content": ev.get("content", "")})
+                self._drain_interactive_user()
+                return True
+
     async def _run_loop(self):
         while True:
-            # 交互型：首轮直接对话，之后等待用户侧栏输入；
-            # 空闲超时自动收敛，不空转调模型（避免无人对话时持续烧 token）
-            if self.kind == "interactive" and self._round > 0:
-                rec = _subagents.get(self.subagent_id)
-                if rec and rec.status != "running":
+            if self.kind == "interactive":
+                if not await self._await_interactive_user():
                     break
-                # 先 drain 已到达的用户消息
-                while not self.queue.empty():
-                    try:
-                        ev = self.queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    if ev.get("type") == "user_message":
-                        self.history.append({"role": "user", "content": ev.get("content", "")})
-                # 无新输入且末尾非 user（模型刚回复过）→ 阻塞等待用户
-                if self.queue.empty() and (not self.history or self.history[-1].get("role") != "user"):
-                    try:
-                        ev = await asyncio.wait_for(self.queue.get(), timeout=_INTERACTIVE_IDLE_TIMEOUT)
-                        if ev.get("type") == "user_message":
-                            self.history.append({"role": "user", "content": ev.get("content", "")})
-                    except TimeoutError:
-                        await self._finish("done", "[空闲超时] 用户未继续对话，交互型子 agent 自动收敛")
-                        break
 
             # 构造消息并调模型
             messages = self._build_messages()
@@ -521,10 +530,6 @@ class SubAgentLoop:
                 last_user = m.get("content", "")
                 break
         if self.kind == "interactive":
-            # 交互型：若历史仅含任务，返回引导语等待用户
-            if self._round == 1:
-                return {"text": f"[交互型子 agent 已就绪]\n任务: {self.task}\n请在侧栏输入以对话，完成后我将调用 finish_subagent。", "tool_calls": []}
-            # 若用户已发送消息，模拟 finish
             if last_user and "finish" in last_user.lower():
                 return {"text": "收到，准备收敛。", "tool_calls": [{"name": "finish_subagent", "args": {"summary": f"用户确认完成: {last_user[:100]}"}, "id": str(uuid.uuid4())}]}
             return {"text": f"收到: {last_user}\n(演示模式，发送包含 'finish' 的消息以触发 finish_subagent)", "tool_calls": []}
@@ -841,7 +846,18 @@ async def spawn_interactive(
         _loops[subagent_id] = loop
         task = asyncio.create_task(loop.run())
         _tasks[subagent_id] = task
-    await _broadcast(session_id, "subagent.opened", {"subagent_id": subagent_id, "kind": "interactive", "session_id": session_id, "task": task_desc}, broadcaster)
+    await _broadcast(
+        session_id,
+        "subagent.opened",
+        {
+            "subagent_id": subagent_id,
+            "kind": "interactive",
+            "session_id": session_id,
+            "task": task_desc,
+            "status": "running",
+        },
+        broadcaster,
+    )
     try:
         from app import persist as persist_mod
 
@@ -866,15 +882,21 @@ async def open_interactive_for_user(
     broadcaster,
     main_enqueue,
     manager_get,
+    first_message: str | None = None,
 ) -> str:
-    """用户从顶栏呼出交互型侧栏。已有运行中的则复用，否则新开。成功返回 subagent_id，失败返回 [拒绝]/[错误]。"""
+    """打开或复用交互型。有 first_message 才入队（调模型）；成功返回 subagent_id。"""
+    text = (first_message or "").strip()
     running = [p for p in get_panels(session_id) if p.get("status") == "running"]
     if running:
-        return running[0]["subagent_id"]
+        sid = running[0]["subagent_id"]
+        if text:
+            await handle_subagent_response(session_id, sid, text)
+        return sid
+    goal = text[:80] if text else "侧栏对话"
     msg = await spawn_interactive(
         session_id,
         "用户侧栏对话",
-        "与用户对话；需要时调用 finish_subagent 将摘要回投主 agent",
+        goal,
         main_history,
         summary,
         broadcaster,
@@ -884,7 +906,10 @@ async def open_interactive_for_user(
     if msg.startswith(("[拒绝]", "[错误]")):
         return msg
     running = [p for p in get_panels(session_id) if p.get("status") == "running"]
-    return running[0]["subagent_id"] if running else msg
+    sid = running[0]["subagent_id"] if running else msg
+    if text and running:
+        await handle_subagent_response(session_id, sid, text)
+    return sid
 
 
 async def spawn_worker_batch(

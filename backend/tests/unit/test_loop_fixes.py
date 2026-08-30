@@ -105,6 +105,51 @@ async def test_open_interactive_for_user_reuses_running():
     await asyncio.sleep(0.2)
 
 
+async def test_interactive_waits_for_user_before_model():
+    """打开交互型不调模型，直到侧栏发来用户消息"""
+
+    async def noop_enqueue(_ev):
+        return None
+
+    sid = "ut_wait_user"
+    opened = await sa.open_interactive_for_user(sid, [], None, None, noop_enqueue, lambda _s: None)
+    loop = sa._loops[opened]
+    loop.executor._llm = None
+    await asyncio.sleep(0.35)
+    assert sa._subagents[opened].status == "running"
+    assert not any(m.get("role") == "assistant" for m in loop.history)
+    await loop.enqueue_user("ping")
+    for _ in range(80):
+        await asyncio.sleep(0.05)
+        if any(m.get("role") == "assistant" for m in loop.history):
+            break
+    assert any(m.get("role") == "assistant" for m in loop.history)
+    await sa.stop_session_subagents(sid)
+    await asyncio.sleep(0.2)
+
+
+async def test_open_interactive_first_message_enqueued():
+    """首条侧栏消息随 open 进入交互型 history"""
+
+    async def noop_enqueue(_ev):
+        return None
+
+    sid = "ut_first_msg"
+    opened = await sa.open_interactive_for_user(
+        sid, [], None, None, noop_enqueue, lambda _s: None, first_message="hello sidebar"
+    )
+    loop = sa._loops[opened]
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        users = [m.get("content") for m in loop.history if m.get("role") == "user"]
+        if any("hello sidebar" in str(c) for c in users):
+            break
+    users = [m.get("content") for m in loop.history if m.get("role") == "user"]
+    assert any("hello sidebar" in str(c) for c in users)
+    await sa.stop_session_subagents(sid)
+    await asyncio.sleep(0.2)
+
+
 async def test_stop_interactive_subagent():
     """agent.stop 可定向终止交互型子 agent，状态置 done 并标记已停止"""
     async def noop_enqueue(_ev):

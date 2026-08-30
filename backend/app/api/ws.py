@@ -191,6 +191,8 @@ async def ws_endpoint(ws: WebSocket):
                 try:
                     from app.agent.subagent import open_interactive_for_user
 
+                    first = payload.get("content")
+                    first_message = first.strip() if isinstance(first, str) else None
                     target = await manager.get_or_create(session_id)
                     target.set_broadcaster(_loop_broadcaster)
                     result = await open_interactive_for_user(
@@ -200,6 +202,7 @@ async def ws_endpoint(ws: WebSocket):
                         _loop_broadcaster,
                         target.enqueue,
                         manager.get,
+                        first_message=first_message,
                     )
                     if result.startswith(("[拒绝]", "[错误]")):
                         await ws.send_text(

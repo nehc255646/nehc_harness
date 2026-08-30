@@ -82,7 +82,7 @@ type State = {
   restorePanels: () => void;
   setSubPanelOpen: (open: boolean) => void;
   toggleSubAgent: () => void;
-  startInteractive: () => void;
+  startInteractive: (content?: string) => void;
   stopWorker: (subagent_id: string) => void;
   connect: (sessionId?: string) => void;
   boot: () => Promise<void>;
@@ -410,7 +410,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
       set((s) => ({
         subPanels: [
           ...s.subPanels.filter((x) => x.subagent_id !== panel.subagent_id),
-          { ...panel, messages: [] },
+          { ...panel, status: panel.status || "running", messages: [] },
         ],
         dismissedPanels: s.dismissedPanels.filter((id) => id !== panel.subagent_id),
         subPanelOpen: true,
@@ -600,12 +600,18 @@ export const useAgentStore = create<State>((set, get) => ({
   },
   restorePanels: () => set({ dismissedPanels: [], subPanelOpen: true }),
   setSubPanelOpen: (open) => set({ subPanelOpen: open }),
-  startInteractive: () => {
+  startInteractive: (content) => {
     const s = get();
     set({ dismissedPanels: [], subPanelOpen: true });
-    if (!s.subPanels.some((p) => p.status === "running")) {
-      wsClient.send("subagent.open", { session_id: s.sessionId });
+    const text = (content || "").trim();
+    const running = s.subPanels.find((p) => p.status === "running");
+    if (running) {
+      if (text) {
+        wsClient.send("subagent.response", { session_id: s.sessionId, subagent_id: running.subagent_id, content: text });
+      }
+      return;
     }
+    wsClient.send("subagent.open", { session_id: s.sessionId, content: text });
   },
   toggleSubAgent: () => {
     const s = get();
@@ -613,7 +619,7 @@ export const useAgentStore = create<State>((set, get) => ({
       set({ subPanelOpen: false });
       return;
     }
-    get().startInteractive();
+    set({ dismissedPanels: [], subPanelOpen: true });
   },
   stopWorker: (subagent_id) => {
     wsClient.send("agent.stop", { agent_id: subagent_id });

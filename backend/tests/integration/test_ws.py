@@ -103,9 +103,12 @@ def test_ws_user_opens_interactive():
         ws.send_json({"event": "subagent.open", "payload": {}})
         opened = _recv_until(ws, "subagent.opened")
         assert opened.get("kind") == "interactive"
+        assert opened.get("status") == "running"
         sid = str(opened.get("subagent_id", ""))
         assert sid.startswith("sub_")
         ws.send_json({"event": "agent.stop", "payload": {"agent_id": sid}})
+        done = _recv_until(ws, "subagent.done")
+        assert done.get("subagent_id") == sid
 
 
 def test_ws_duplicate_approval_errors():
