@@ -19,7 +19,7 @@ from app.persist import maybe_import_env_provider
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    log = logging.getLogger("harness")
+    log = logging.getLogger("neharness")
     if not encryption_ready():
         log.warning("ENCRYPTION_KEY 未配置或非法 — Provider api_key 加密将不可用")
     await init_db()
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title="Agent Harness", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Neharness", version="0.1.0", lifespan=lifespan)
 
 _cors = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
 app.add_middleware(
@@ -58,7 +58,7 @@ app.include_router(ws_router)
 
 @app.get("/")
 async def root():
-    return {"name": "Agent Harness", "version": "0.1.0", "docs": "/docs"}
+    return {"name": "Neharness", "version": "0.1.0", "docs": "/docs"}
 
 
 @app.get("/health")

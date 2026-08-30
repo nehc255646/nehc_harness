@@ -1,4 +1,4 @@
-# Harness backend
+# Neharness backend
 
 See the repository [README](../README.md) ([English](../README.en.md)).
 

@@ -18,4 +18,4 @@ def setup_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-logger = logging.getLogger("harness")
+logger = logging.getLogger("neharness")

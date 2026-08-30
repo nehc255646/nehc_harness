@@ -7,7 +7,7 @@ import redis.asyncio as redis
 
 from app.core.config import settings
 
-logger = logging.getLogger("harness.redis")
+logger = logging.getLogger("neharness.redis")
 
 _client: redis.Redis | None = None
 

@@ -370,7 +370,7 @@ wheels = [
 ]
 
 [[package]]
-name = "harness-backend"
+name = "neharness-backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

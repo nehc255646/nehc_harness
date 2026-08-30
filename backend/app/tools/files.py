@@ -9,7 +9,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 
-logger = logging.getLogger("harness.files")
+logger = logging.getLogger("neharness.files")
 
 _DIFF_CAP = 20000
 

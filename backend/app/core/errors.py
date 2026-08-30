@@ -13,7 +13,7 @@ class ErrorCode(str, Enum):
     INTERNAL = "INTERNAL"
 
 
-class HarnessError(Exception):
+class NeharnessError(Exception):
     def __init__(self, code: ErrorCode, message: str):
         self.code = code
         self.message = message

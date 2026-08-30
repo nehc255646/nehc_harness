@@ -1,8 +1,8 @@
-# Agent Harness
+# Neharness
 
 [中文](README.md) · English
 
-A personal, single-machine, single-user web coding agent. The main chat streams work; you open an **interactive** sub-agent from the header; the main agent can spawn **worker** sub-agents in the background. Writes and shell commands go through approval by default.
+Neharness is a personal, single-machine, single-user web coding agent. The main chat streams work; you open an **interactive** sub-agent from the header; the main agent can spawn **worker** sub-agents in the background. Writes and shell commands go through approval by default.
 
 No auth, no rate limits. Binds to localhost by default. Do not expose this to the public internet.
 
@@ -78,7 +78,7 @@ Starts the backend on `:8000` (one worker) and the frontend on `:5173`, and trie
 From a host browser into a VM:
 
 ```bash
-HARNESS_BIND=0.0.0.0 ./start.sh
+NEHARNESS_BIND=0.0.0.0 ./start.sh
 ```
 
 No auth — trusted LAN only. Add the host origin to `CORS_ORIGINS`.

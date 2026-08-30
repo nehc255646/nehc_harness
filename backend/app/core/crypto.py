@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import settings
 
-logger = logging.getLogger("harness.crypto")
+logger = logging.getLogger("neharness.crypto")
 
 _fernet: Fernet | None = None
 

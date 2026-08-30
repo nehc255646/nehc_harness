@@ -10,7 +10,7 @@ from typing import Any
 from app.agent.stream import thinking_extra_body
 from app.core.config import settings
 
-logger = logging.getLogger("harness.executor")
+logger = logging.getLogger("neharness.executor")
 
 # 延迟导入，避免无 key 时启动失败
 try:

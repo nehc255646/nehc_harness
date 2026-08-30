@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 Agent Harness（后端 :8000 单进程 + 前端 :5173）并打开网页
+# 启动 Neharness（后端 :8000 单进程 + 前端 :5173）并打开网页
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,10 +8,10 @@ mkdir -p "$LOG_DIR"
 
 BACKEND_PORT=8000
 FRONTEND_PORT=5173
-BIND="${HARNESS_BIND:-127.0.0.1}"
+BIND="${NEHARNESS_BIND:-${HARNESS_BIND:-127.0.0.1}}"
 
-log()  { echo -e "\033[36m[harness]\033[0m $*"; }
-warn() { echo -e "\033[33m[harness]\033[0m $*" >&2; }
+log()  { echo -e "\033[36m[neharness]\033[0m $*"; }
+warn() { echo -e "\033[33m[neharness]\033[0m $*" >&2; }
 
 # 占用目标端口的旧进程先清理（开发脚本，幂等重启）
 kill_port() {
@@ -98,7 +98,7 @@ else
   if [ "$BIND" = "0.0.0.0" ] && [ -n "$VM_IP" ]; then
     log "  http://$VM_IP:$FRONTEND_PORT    (局域网，无鉴权)"
   else
-    log "  局域网访问: HARNESS_BIND=0.0.0.0 ./start.sh"
+    log "  局域网访问: NEHARNESS_BIND=0.0.0.0 ./start.sh"
   fi
 fi
 

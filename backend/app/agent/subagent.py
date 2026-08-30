@@ -26,7 +26,7 @@ from app.permissions.gate import gate
 from app.permissions.policy import check_policy
 from app.tools.registry import SPAWN_TOOLS, TOOLS, normalize_work_mode, tools_for_work_mode
 
-logger = logging.getLogger("harness.subagent")
+logger = logging.getLogger("neharness.subagent")
 
 # 交互型空闲超时：等待用户侧栏输入的最长时间，超时自动收敛（不空转调模型）
 _INTERACTIVE_IDLE_TIMEOUT = 120

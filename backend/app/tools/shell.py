@@ -15,7 +15,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 
-logger = logging.getLogger("harness.shell")
+logger = logging.getLogger("neharness.shell")
 
 
 def _workdir() -> Path:

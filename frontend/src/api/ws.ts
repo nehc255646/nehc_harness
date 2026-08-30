@@ -7,7 +7,7 @@ export type WSEvent = {
 
 type Outbound = { event: string; payload: Record<string, unknown> };
 
-export class HarnessWS {
+export class NeharnessWS {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: Map<string, Set<(payload: Record<string, unknown>) => void>> = new Map();
@@ -128,4 +128,4 @@ export class HarnessWS {
   }
 }
 
-export const wsClient = new HarnessWS();
+export const wsClient = new NeharnessWS();

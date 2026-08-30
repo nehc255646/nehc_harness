@@ -8,7 +8,7 @@ import WorkerStatus from "./components/subagent/WorkerStatus";
 import AccentPicker from "./components/AccentPicker";
 import { IconMenu, IconPanelRight, IconSettings, IconStop } from "./components/icons";
 
-const SIDEBAR_KEY = "harness.sessionSidebarCollapsed";
+const SIDEBAR_KEY = "neharness.sessionSidebarCollapsed";
 
 function readSidebarCollapsed(): boolean {
   try {
@@ -57,7 +57,7 @@ export default function App() {
     agentState === "awaiting_approval" ||
     workers.some((w) => w.state === "running") ||
     subPanels.some((p) => p.status === "running");
-  const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Agent Harness";
+  const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Neharness";
   const subCount = subPanels.length;
 
   useEffect(() => {

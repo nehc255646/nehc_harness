@@ -9,10 +9,10 @@ _UNIQUE = f"test_{uuid.uuid4().hex[:8]}"
 
 def test_write_read_roundtrip():
     path = f"{_UNIQUE}.txt"
-    r1 = write.invoke({"path": path, "content": "hello harness"})
+    r1 = write.invoke({"path": path, "content": "hello Neharness"})
     assert "已写入" in r1
     r2 = read.invoke({"path": path})
-    assert "hello harness" in r2
+    assert "hello Neharness" in r2
 
 
 def test_read_missing():

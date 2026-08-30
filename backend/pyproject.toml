@@ -1,7 +1,7 @@
 [project]
-name = "harness-backend"
+name = "neharness-backend"
 version = "0.1.0"
-description = "Agent Harness backend — FastAPI + LangChain hand-written loop"
+description = "Neharness backend — FastAPI + LangChain hand-written loop"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

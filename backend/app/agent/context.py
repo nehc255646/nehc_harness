@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 
-logger = logging.getLogger("harness.context")
+logger = logging.getLogger("neharness.context")
 
 try:
     import tiktoken

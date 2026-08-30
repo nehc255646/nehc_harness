@@ -25,7 +25,7 @@ from app.models import (
     utcnow,
 )
 
-logger = logging.getLogger("harness.persist")
+logger = logging.getLogger("neharness.persist")
 
 _DECISION_MAP = {
     "approve": "approved_once",

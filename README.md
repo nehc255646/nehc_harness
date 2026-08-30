@@ -1,8 +1,8 @@
-# Agent Harness
+# Neharness
 
 [English](README.en.md) · 中文
 
-个人单机、单用户的 Web coding agent：主对话流式工作，顶栏开交互型子 agent，主 agent 可派生后台工作型。文件写入和 shell 默认先审批。
+Neharness 是个人单机、单用户的 Web coding agent：主对话流式工作，顶栏开交互型子 agent，主 agent 可派生后台工作型。文件写入和 shell 默认先审批。
 
 无鉴权、无限流。默认只监听本机。不要暴露到公网。
 
@@ -78,7 +78,7 @@ chmod +x start.sh
 虚拟机要从宿主机访问：
 
 ```bash
-HARNESS_BIND=0.0.0.0 ./start.sh
+NEHARNESS_BIND=0.0.0.0 ./start.sh
 ```
 
 无鉴权，只在可信网络用。同时把宿主机源加进 `CORS_ORIGINS`。

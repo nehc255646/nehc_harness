@@ -18,7 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
-logger = logging.getLogger("harness.db")
+logger = logging.getLogger("neharness.db")
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None

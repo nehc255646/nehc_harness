@@ -76,7 +76,7 @@ export default function SessionSidebar({
         {!rail && (
           <>
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold tracking-tight">Harness</div>
+              <div className="text-sm font-semibold tracking-tight">Neharness</div>
               <div className="text-[11px] text-faint">coding agent</div>
             </div>
             <button

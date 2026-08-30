@@ -39,7 +39,7 @@ from app.schemas import (
     ToolLogOut,
 )
 
-logger = logging.getLogger("harness.rest")
+logger = logging.getLogger("neharness.rest")
 router = APIRouter(prefix="/api", tags=["rest"])
 
 

@@ -35,7 +35,7 @@ from app.tools.registry import SPAWN_TOOLS, TOOL_MAP, normalize_work_mode, tools
 # M2 子 agent 依赖延迟导入，避免循环
 
 
-logger = logging.getLogger("harness.loop")
+logger = logging.getLogger("neharness.loop")
 
 
 def _msg_sig(m: dict) -> str:
@@ -802,7 +802,7 @@ class AgentLoop:
         if "write" in last_user_lower or "写入" in last_user_lower or "创建" in last_user_lower:
             return {
                 "text": "准备写入文件：",
-                "tool_calls": [{"name": "write", "args": {"path": "hello.txt", "content": "hello from harness"}, "id": str(uuid.uuid4())}],
+                "tool_calls": [{"name": "write", "args": {"path": "hello.txt", "content": "hello from Neharness"}, "id": str(uuid.uuid4())}],
             }
         # 默认返回文本，引导用户尝试工具
         return {

@@ -7,7 +7,7 @@ export const ACCENTS = {
 
 export type AccentId = keyof typeof ACCENTS;
 export const DEFAULT_ACCENT: AccentId = "cyan";
-export const ACCENT_STORAGE_KEY = "harness-accent";
+export const ACCENT_STORAGE_KEY = "neharness-accent";
 
 export function isAccentId(v: string): v is AccentId {
   return v in ACCENTS;

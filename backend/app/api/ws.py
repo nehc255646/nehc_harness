@@ -15,7 +15,7 @@ from app.core.db import is_available
 from app.core.errors import ErrorCode
 from app.permissions.gate import gate
 
-logger = logging.getLogger("harness.ws")
+logger = logging.getLogger("neharness.ws")
 
 router = APIRouter()
 

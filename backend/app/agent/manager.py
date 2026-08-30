@@ -5,7 +5,7 @@ import logging
 
 from app.agent.loop import AgentLoop
 
-logger = logging.getLogger("harness.manager")
+logger = logging.getLogger("neharness.manager")
 
 
 class AgentManager:

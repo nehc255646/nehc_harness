@@ -1,9 +1,9 @@
-# 备选：仅在无本机 MySQL/Redis 时启用
+# Neharness 备选：仅在无本机 MySQL/Redis 时启用
 # 本机已有 MySQL 8.4 (3306) / Redis (6379) 则无需启动
 services:
   mysql:
     image: mysql:8.4
-    container_name: harness-mysql
+    container_name: neharness-mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-harness_root}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-harness}
@@ -21,7 +21,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: harness-redis
+    container_name: neharness-redis
     ports:
       - "127.0.0.1:6379:6379"
     volumes:

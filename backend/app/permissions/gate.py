@@ -5,7 +5,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-logger = logging.getLogger("harness.gate")
+logger = logging.getLogger("neharness.gate")
 
 _ALLOWED_RULE_KINDS = {"shell_prefix", "tool"}
 

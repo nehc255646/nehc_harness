@@ -19,9 +19,9 @@ from typing import Any
 from app.core.config import settings
 from app.core.redis import get_redis
 
-logger = logging.getLogger("harness.rtstore")
+logger = logging.getLogger("neharness.rtstore")
 
-PREFIX = "harness"
+PREFIX = "neharness"
 
 
 def _state_ttl() -> int:

@@ -5,7 +5,7 @@ import { IconSend } from "./icons";
 import ThinkingBlock from "./ThinkingBlock";
 import ToolCallCard from "./ToolCallCard";
 
-const EXAMPLES_AUTO = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello harness"];
+const EXAMPLES_AUTO = ["执行 echo hello", "列出当前工作目录", "写入 hello.txt，内容为 hello Neharness"];
 const EXAMPLES_PLAN = ["阅读工作区结构", "说明当前代码如何启动", "给出下一步实现计划"];
 const COL = "mx-auto w-full max-w-6xl px-4 sm:px-6";
 
