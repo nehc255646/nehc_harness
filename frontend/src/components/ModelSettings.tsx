@@ -328,8 +328,13 @@ export default function ModelSettings({
 
   const isNew = selected === "new" || draft.pk == null;
 
+  const requestClose = () => {
+    if (dirty && !window.confirm("有未保存的更改，关闭将丢弃。继续？")) return;
+    onClose();
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-sm sm:p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-sm sm:p-6" onClick={requestClose}>
       <div
         className="flex h-[min(92vh,760px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-surface shadow-panel md:flex-row"
         onClick={(e) => e.stopPropagation()}
@@ -384,7 +389,7 @@ export default function ModelSettings({
               <h3 className="text-lg font-semibold">{isNew ? "添加供应商" : "编辑供应商"}</h3>
               <p className="mt-1 text-xs text-faint">配置与 OpenAI 兼容的供应商（chat/completions）。</p>
             </div>
-            <button onClick={onClose} className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-white" aria-label="关闭">
+            <button onClick={requestClose} className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-white" aria-label="关闭">
               <IconClose />
             </button>
           </div>

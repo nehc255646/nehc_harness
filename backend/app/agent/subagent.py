@@ -335,9 +335,8 @@ class SubAgentLoop:
 
     async def _run_loop(self):
         while True:
-            if self.kind == "interactive":
-                if not await self._await_interactive_user():
-                    break
+            if self.kind == "interactive" and not await self._await_interactive_user():
+                break
 
             # 构造消息并调模型
             messages = self._build_messages()
@@ -375,30 +374,39 @@ class SubAgentLoop:
                 self.history.append({"role": "assistant", "content": text})
 
             if tool_calls:
-                # 检查收敛工具
                 finish_name = "finish_subagent" if self.kind == "interactive" else "finish_worker"
                 fin = next((tc for tc in tool_calls if tc.get("name") == finish_name), None)
+                work = [tc for tc in tool_calls if tc.get("name") != finish_name]
+                if work:
+                    if self.kind == "worker":
+                        tool_results = await self._dispatch_worker_tools(work)
+                        self.history.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
+                        for tr in tool_results:
+                            self.history.append(
+                                {
+                                    "role": "tool",
+                                    "content": tr["result"],
+                                    "tool_call_id": tr["call_id"],
+                                    "name": tr["name"],
+                                }
+                            )
+                    else:
+                        self.history.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
+                        for tc in work:
+                            self.history.append(
+                                {
+                                    "role": "tool",
+                                    "content": f"[忽略] 交互型不支持工具 {tc.get('name')}",
+                                    "tool_call_id": tc.get("id", ""),
+                                    "name": tc.get("name", ""),
+                                }
+                            )
                 if fin:
-                    summary = ""
                     args = fin.get("args") or {}
                     summary = args.get("summary") or args.get("result") or str(args) or text
                     await self._finish("done", summary)
                     break
-
-                # 工作型需执行其他工具（含审批）
-                if self.kind == "worker":
-                    tool_results = await self._dispatch_worker_tools(tool_calls)
-                    # 原子回填
-                    self.history.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
-                    for tr in tool_results:
-                        self.history.append({"role": "tool", "content": tr["result"], "tool_call_id": tr["call_id"], "name": tr["name"]})
-                    continue
-                else:
-                    # 交互型不应有其他工具，忽略
-                    self.history.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
-                    for tc in tool_calls:
-                        self.history.append({"role": "tool", "content": f"[忽略] 交互型不支持工具 {tc.get('name')}", "tool_call_id": tc.get("id", ""), "name": tc.get("name", "")})
-                    continue
+                continue
             else:
                 # 纯文本（text 已随 _emit_text/流式路径入 history，此处不再追加）
                 if not text and self.kind == "worker":

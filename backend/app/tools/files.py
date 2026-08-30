@@ -72,6 +72,17 @@ def _workdir() -> Path:
     return p
 
 
+def _contained(path: Path, wd: Path) -> bool:
+    """真实路径仍在 WORKDIR 内，且自身不是指向外部的 symlink。"""
+    try:
+        if path.is_symlink():
+            return False
+        path.resolve().relative_to(wd)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _resolve(path: str) -> Path | None:
     """约束在 WORKDIR 内，越权路径直接拒绝 (返回 None)"""
     wd = _workdir()
@@ -164,9 +175,11 @@ def grep(pattern: str, path: str = ".") -> str:
     for f in files:
         if not f.is_file():
             continue
+        if not _contained(f, wd):
+            continue
         # 跳过二进制/大文件；stat 竞态（删除/权限）逐条跳过而非整次失败
         try:
-            if f.stat().st_size > 2_000_000:
+            if f.stat(follow_symlinks=False).st_size > 2_000_000:
                 continue
         except OSError as e:
             logger.debug("grep stat failed: %s", e)

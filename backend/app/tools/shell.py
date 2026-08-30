@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -28,6 +29,21 @@ def _workdir() -> Path:
 # 跟踪 shell 进程组，按 agent 分组，供 agent.stop 定向回收
 _active_pgs: dict[str, set[int]] = {}
 
+_SECRET_ENV_RE = re.compile(
+    r"(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|ENCRYPTION_KEY|"
+    r"^REDIS_URL$|^DATABASE_URL$|^MYSQL_|^POSTGRES_|^AWS_|^OPENAI_|^ANTHROPIC_)",
+    re.IGNORECASE,
+)
+_MAX_CAPTURE = 2_000_000
+
+
+def _shell_env() -> dict[str, str]:
+    """执行环境去掉密钥类变量，避免 env/printenv 把后端凭据写进 tool 结果。"""
+    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV_RE.search(k)}
+    env["HOME"] = str(_workdir())
+    env["PWD"] = str(_workdir())
+    return env
+
 
 @tool
 def shell(command: str) -> str:
@@ -44,6 +60,7 @@ def shell(command: str) -> str:
             timeout=settings.shell_timeout,
             start_new_session=True,
             check=False,
+            env=_shell_env(),
         )
         output = (result.stdout or "") + (result.stderr or "")
         if not output:
@@ -80,6 +97,7 @@ async def shell_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=_shell_env(),
     )
     # 记录 pgid (按 agent 分组)
     pgid: int | None = None
@@ -113,11 +131,15 @@ async def shell_async(
     async def _pump(stream, bucket: list[bytes]) -> None:
         if stream is None:
             return
+        captured = 0
         while True:
             chunk = await stream.read(2048)
             if not chunk:
                 break
-            bucket.append(chunk)
+            if captured < _MAX_CAPTURE:
+                room = _MAX_CAPTURE - captured
+                bucket.append(chunk[:room])
+                captured += min(len(chunk), room)
             await _maybe_progress()
 
     try:

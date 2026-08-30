@@ -209,6 +209,7 @@ class Executor:
             "api_key": self.api_key or "no-key",
             "temperature": self.temperature,
             "streaming": True,
+            "timeout": float(settings.llm_timeout),
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url
@@ -236,7 +237,7 @@ class Executor:
 
         kwargs: dict[str, Any] = {
             "api_key": self.api_key or "no-key",
-            "timeout": 45.0,
+            "timeout": float(settings.llm_timeout),
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url

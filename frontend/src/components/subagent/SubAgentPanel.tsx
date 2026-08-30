@@ -12,7 +12,7 @@ export default function SubAgentPanel({
   open: boolean;
   onClose: () => void;
 }) {
-  const { subPanels, dismissedPanels, sendSubagentMessage, startInteractive } = useAgentStore();
+  const { subPanels, dismissedPanels, sendSubagentMessage, startInteractive, stopInteractive } = useAgentStore();
   const [draft, setDraft] = useState("");
   const visible = subPanels.filter((p) => !dismissedPanels.includes(p.subagent_id));
   const active = visible.find((p) => p.status === "running") || visible[visible.length - 1];
@@ -68,19 +68,30 @@ export default function SubAgentPanel({
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-faint">交互对话</span>
-            {active && (
-              <span
-                className={`rounded-full px-1.5 py-0.5 text-[10px] ${
-                  running
-                    ? "bg-amber-500/15 text-amber-300"
-                    : active.status === "done"
-                      ? "bg-emerald-500/15 text-emerald-300"
-                      : "bg-red-500/15 text-red-300"
-                }`}
-              >
-                {running ? "对话中" : active.status === "done" ? "已结束" : active.status}
-              </span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {active && (
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                    running
+                      ? "bg-amber-500/15 text-amber-300"
+                      : active.status === "done"
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : "bg-red-500/15 text-red-300"
+                  }`}
+                >
+                  {running ? "对话中" : active.status === "done" ? "已结束" : active.status}
+                </span>
+              )}
+              {running && active && (
+                <button
+                  type="button"
+                  className="text-[10px] text-red-300 hover:text-red-200"
+                  onClick={() => stopInteractive(active.subagent_id)}
+                >
+                  停止
+                </button>
+              )}
+            </div>
           </div>
 
           {active?.task && <p className="line-clamp-2 shrink-0 px-3 text-[11px] text-muted">{active.task}</p>}
@@ -126,7 +137,7 @@ export default function SubAgentPanel({
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") send();
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing) send();
                 }}
                 placeholder={running ? "对交互子 agent 说话…" : "发消息开始侧栏对话…"}
                 className="ui-input flex-1 px-2 py-1.5 text-xs"

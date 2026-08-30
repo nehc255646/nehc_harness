@@ -93,11 +93,15 @@ type State = {
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   stopAgent: () => void;
+  selectSession: (id: string) => void;
+  createSession: () => void;
+  stopInteractive: (subagent_id: string) => void;
 };
 
 // 事件 handler 只注册一次（StrictMode/重复 connect 下不重复绑定）
 let handlersBound = false;
 let bootStarted = false;
+let pendingHello: string | "any" | null = null;
 
 // 子 agent 流式消息归属：message_id -> subagent_id
 const subMessageOwner = new Map<string, string>();
@@ -107,7 +111,37 @@ function updateSubPanelMessages(
   subagentId: string,
   fn: (msgs: SubPanelMessage[]) => SubPanelMessage[],
 ): SubPanel[] {
-  return panels.map((x) => (x.subagent_id === subagentId ? { ...x, messages: fn(x.messages || []) } : x));
+  const ensured = panels.some((x) => x.subagent_id === subagentId)
+    ? panels
+    : [
+        ...panels,
+        { subagent_id: subagentId, kind: "interactive", task: "", status: "running", messages: [] as SubPanelMessage[] },
+      ];
+  return ensured.map((x) => (x.subagent_id === subagentId ? { ...x, messages: fn(x.messages || []) } : x));
+}
+
+function rememberSubOwner(messageId: string, subagentId: string) {
+  if (subMessageOwner.size > 500) {
+    const first = subMessageOwner.keys().next().value;
+    if (first) subMessageOwner.delete(first);
+  }
+  subMessageOwner.set(messageId, subagentId);
+}
+
+function resetSessionView(set: (partial: Partial<State>) => void, id: string, title?: string) {
+  subMessageOwner.clear();
+  set({
+    sessionId: id,
+    sessionTitle: title || "",
+    messages: [],
+    toolCalls: [],
+    pendingApprovals: [],
+    subPanels: [],
+    workers: [],
+    dismissedPanels: [],
+    agentState: "idle",
+    sendBlockedReason: "",
+  });
 }
 
 function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void, get: () => State) {
@@ -117,9 +151,17 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("connection", (p) => set({ connectionState: p.state as State["connectionState"] }));
 
   wsClient.on("session.hello", (p) => {
-    // 断线恢复对账；新会话时清空展示
     const sid2 = p.session_id as string;
+    if (pendingHello === "any") {
+      pendingHello = null;
+    } else if (pendingHello && sid2 !== pendingHello) {
+      return;
+    } else if (get().sessionId && sid2 !== get().sessionId) {
+      return;
+    }
+    pendingHello = null;
     wsClient.setSession(sid2);
+    subMessageOwner.clear();
     set((s) => {
       const incomingPanels = Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels;
       const merged = incomingPanels.map((np) => {
@@ -179,7 +221,15 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
         const liveById = new Map(s.toolCalls.map((t) => [t.call_id, t]));
         const merged: ToolCall[] = fromRest.map((t) => {
           const live = liveById.get(t.call_id);
-          return live ? { ...t, ...live, messageId: live.messageId || t.messageId } : t;
+          if (!live) return t;
+          return {
+            ...t,
+            ...live,
+            result: live.result !== undefined ? live.result : t.result,
+            diff: live.diff || t.diff,
+            progress: live.result !== undefined ? undefined : live.progress,
+            messageId: live.messageId || t.messageId,
+          };
         });
         for (const t of s.toolCalls) {
           if (!restIds.has(t.call_id)) merged.push(t);
@@ -217,9 +267,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     const id = p.message_id as string;
     const subagentId = p.subagent_id as string | undefined;
     if (subagentId) {
-      // 子 agent 流式 → 侧栏面板；防 start/done 失配导致 map 无限增长
-      if (subMessageOwner.size > 500) subMessageOwner.clear();
-      subMessageOwner.set(id, subagentId);
+      rememberSubOwner(id, subagentId);
       set((s) => ({
         subPanels: updateSubPanelMessages(s.subPanels, subagentId, (msgs) => [
           ...msgs,
@@ -237,7 +285,8 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     const id = p.message_id as string;
     const delta = (p.delta as string) || "";
     const thinkingCh = p.channel === "thinking";
-    const subagentId = subMessageOwner.get(id);
+    const subagentId = (p.subagent_id as string | undefined) || subMessageOwner.get(id);
+    if (subagentId) rememberSubOwner(id, subagentId);
     const patchMsg = <T extends { id: string; content: string; thinking?: string; thinkingStreaming?: boolean }>(
       m: T,
     ): T => {
@@ -279,7 +328,7 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
   wsClient.on("message.done", (p) => {
     const id = p.message_id as string;
     const thinking = typeof p.thinking === "string" ? p.thinking : undefined;
-    const subagentId = subMessageOwner.get(id);
+    const subagentId = (p.subagent_id as string | undefined) || subMessageOwner.get(id);
     subMessageOwner.delete(id);
     if (subagentId) {
       set((s) => ({
@@ -381,24 +430,25 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
     set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== p.approval_id) })),
   );
   wsClient.on("error", (p) => {
-    // 后端错误（模型失败/审批已处理/agent 不存在）落为本地错误气泡，不再静默
     const message = typeof p.message === "string" ? p.message : JSON.stringify(p);
+    if (message.includes("已处理或不存在")) return;
     set((s) => ({
       messages: [...s.messages, { id: `err-${Date.now()}`, role: "assistant", content: `[错误] ${message}` }],
     }));
   });
   wsClient.on("session.deleted", (p) => {
-    // 其他标签页删除了当前会话：刷新列表并切换到首个会话
     const deletedId = p.session_id as string;
     if (deletedId !== get().sessionId) return;
     rest
       .sessions()
-      .then((rows) => {
-        const next = rows[0];
-        if (next) {
-          set({ sessionRows: rows });
-          wsClient.send("session.select", { session_id: next.id });
+      .then(async (rows) => {
+        set({ sessionRows: rows });
+        let next = rows[0];
+        if (!next) {
+          next = await rest.createSession("New Session");
+          set({ sessionRows: [next] });
         }
+        get().selectSession(next.id);
       })
       .catch(() => {
         /* ignore */
@@ -481,6 +531,7 @@ export const useAgentStore = create<State>((set, get) => ({
 
   connect: (sessionId) => {
     const sid = sessionId || get().sessionId;
+    pendingHello = sid;
     set({ sessionId: sid, connectionState: "connecting" });
     bindHandlers(set, get);
     wsClient.connect(sid);
@@ -499,11 +550,12 @@ export const useAgentStore = create<State>((set, get) => ({
         sid = created.id;
         set({ sessionRows: [created] });
       }
+      pendingHello = sid;
       set({ sessionId: sid, connectionState: "connecting" });
       wsClient.connect(sid);
     } catch {
-      // MySQL 不可用：仍连 WS，走内存会话
       const sid = get().sessionId || "default";
+      pendingHello = sid;
       set({ sessionId: sid, connectionState: "connecting" });
       wsClient.connect(sid);
     }
@@ -557,18 +609,50 @@ export const useAgentStore = create<State>((set, get) => ({
     if (sid) wsClient.send("agent.stop", { agent_id: sid });
   },
 
+  stopInteractive: (subagent_id) => {
+    if (subagent_id) wsClient.send("agent.stop", { agent_id: subagent_id });
+  },
+
+  selectSession: (id) => {
+    if (!id || id === get().sessionId) return;
+    pendingHello = id;
+    wsClient.setSession(id);
+    resetSessionView(set, id, get().sessionRows.find((r) => r.id === id)?.title);
+    wsClient.send("session.select", { session_id: id });
+  },
+
+  createSession: () => {
+    pendingHello = "any";
+    subMessageOwner.clear();
+    set({
+      messages: [],
+      toolCalls: [],
+      pendingApprovals: [],
+      subPanels: [],
+      workers: [],
+      dismissedPanels: [],
+      agentState: "idle",
+    });
+    wsClient.send("session.create", { title: "New Session" });
+  },
+
   deleteSession: async (id) => {
-    await rest.deleteSession(id);
-    const rows = await rest.sessions();
-    set({ sessionRows: rows });
-    if (get().sessionId === id) {
-      const next = rows[0];
-      if (next) {
-        wsClient.send("session.select", { session_id: next.id });
-      } else {
-        const created = await rest.createSession("New Session");
-        wsClient.send("session.select", { session_id: created.id });
+    try {
+      await rest.deleteSession(id);
+      const rows = await rest.sessions();
+      set({ sessionRows: rows });
+      if (get().sessionId === id) {
+        const next = rows[0];
+        if (next) {
+          get().selectSession(next.id);
+        } else {
+          const created = await rest.createSession("New Session");
+          set({ sessionRows: [created] });
+          get().selectSession(created.id);
+        }
       }
+    } catch (e) {
+      set({ sendBlockedReason: `删除失败: ${String(e)}` });
     }
   },
 
@@ -585,6 +669,7 @@ export const useAgentStore = create<State>((set, get) => ({
   },
 
   respondApproval: (approval_id, decision) => {
+    set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== approval_id) }));
     wsClient.send("approval.response", { approval_id, decision });
   },
   sendSubagentMessage: (subagent_id, content) => {

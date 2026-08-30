@@ -177,6 +177,12 @@ class AgentLoop:
             logger.info("AgentLoop task started: session=%s", self.session_id)
 
     async def stop(self):
+        try:
+            from app.agent.subagent import stop_session_subagents
+
+            await stop_session_subagents(self.session_id)
+        except Exception:
+            logger.exception("stop subagents from main failed: %s", self.session_id)
         self._stop_event.set()
         self._shutdown_cleanup()
         await self._set_state("done")
@@ -611,11 +617,13 @@ class AgentLoop:
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
+        pushed_output = False
 
         try:
             async for thinking, delta, tcs in iter_channels(self.executor, messages, self._bound_tools()):
                 if thinking:
                     thinking_parts.append(thinking)
+                    pushed_output = True
                     await self._broadcast(
                         "message.delta",
                         {
@@ -627,6 +635,7 @@ class AgentLoop:
                     )
                 if delta:
                     text_parts.append(delta)
+                    pushed_output = True
                     await self._broadcast(
                         "message.delta",
                         {"agent_id": self.agent_id, "message_id": message_id, "delta": delta},
@@ -634,46 +643,51 @@ class AgentLoop:
                 if tcs:
                     accumulate_tool_calls(tool_calls_acc, {"tool_call_chunks": tcs})
         except Exception as e:
-            # 若流式失败，尝试非流式
-            logger.warning("Stream failed, fallback to ainvoke: %s", e)
-            result = await self.executor.ainvoke(messages, self._bound_tools())
-            raw = getattr(result, "content", "") or ""
-            extra = getattr(result, "additional_kwargs", None) or {}
-            think_raw = ""
-            if isinstance(extra, dict):
-                think_raw = extra.get("reasoning_content") or extra.get("reasoning") or ""
-                if not isinstance(think_raw, str):
-                    think_raw = ""
-            splitter = ThinkTagSplitter()
-            tag_th, tag_ct = splitter.feed(raw if isinstance(raw, str) else "")
-            th_f, ct_f = splitter.flush()
-            think_all = think_raw + tag_th + th_f
-            text = tag_ct + ct_f
-            if not text and isinstance(raw, str) and not tag_th:
-                text = raw
-            if think_all:
-                thinking_parts = [think_all]
-                await self._broadcast(
-                    "message.delta",
-                    {
-                        "agent_id": self.agent_id,
-                        "message_id": message_id,
-                        "delta": think_all,
-                        "channel": "thinking",
-                    },
-                )
-            if text:
-                text_parts = [text]
-                await self._broadcast("message.delta", {"agent_id": self.agent_id, "message_id": message_id, "delta": text})
-            raw_tcs = getattr(result, "tool_calls", None) or []
-            for idx, tc in enumerate(raw_tcs):
-                # 非流式返回的 args 已是 dict，直接保留
-                tool_calls_acc[idx] = {
-                    "name": tc.get("name", ""),
-                    "args": tc.get("args", {}) if isinstance(tc.get("args", {}), dict) else str(tc.get("args", "")),
-                    "id": tc.get("id", str(uuid.uuid4())),
-                    "index": idx,
-                }
+            # 已向客户端推过 delta 则不再 ainvoke 重播，避免 UI 正文重复
+            if pushed_output:
+                logger.warning("Stream failed after output, keep partial: %s", e)
+            else:
+                logger.warning("Stream failed, fallback to ainvoke: %s", e)
+                result = await self.executor.ainvoke(messages, self._bound_tools())
+                raw = getattr(result, "content", "") or ""
+                extra = getattr(result, "additional_kwargs", None) or {}
+                think_raw = ""
+                if isinstance(extra, dict):
+                    think_raw = extra.get("reasoning_content") or extra.get("reasoning") or ""
+                    if not isinstance(think_raw, str):
+                        think_raw = ""
+                splitter = ThinkTagSplitter()
+                tag_th, tag_ct = splitter.feed(raw if isinstance(raw, str) else "")
+                th_f, ct_f = splitter.flush()
+                think_all = think_raw + tag_th + th_f
+                text = tag_ct + ct_f
+                if not text and isinstance(raw, str) and not tag_th:
+                    text = raw
+                if think_all:
+                    thinking_parts = [think_all]
+                    await self._broadcast(
+                        "message.delta",
+                        {
+                            "agent_id": self.agent_id,
+                            "message_id": message_id,
+                            "delta": think_all,
+                            "channel": "thinking",
+                        },
+                    )
+                if text:
+                    text_parts = [text]
+                    await self._broadcast(
+                        "message.delta",
+                        {"agent_id": self.agent_id, "message_id": message_id, "delta": text},
+                    )
+                raw_tcs = getattr(result, "tool_calls", None) or []
+                for idx, tc in enumerate(raw_tcs):
+                    tool_calls_acc[idx] = {
+                        "name": tc.get("name", ""),
+                        "args": tc.get("args", {}) if isinstance(tc.get("args", {}), dict) else str(tc.get("args", "")),
+                        "id": tc.get("id", str(uuid.uuid4())),
+                        "index": idx,
+                    }
 
         full_text = "".join(text_parts)
         full_thinking = "".join(thinking_parts)

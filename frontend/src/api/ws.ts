@@ -5,16 +5,19 @@ export type WSEvent = {
   payload: Record<string, unknown>;
 };
 
+type Outbound = { event: string; payload: Record<string, unknown> };
+
 export class HarnessWS {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: Map<string, Set<(payload: Record<string, unknown>) => void>> = new Map();
   private reconnectTimer: number | null = null;
-  // 跟踪最新会话，断线重连时使用（session.select 切换后不回连旧会话）
   private sessionId = "default";
+  private manualClose = false;
+  private outbound: Outbound[] = [];
+  private attempt = 0;
 
   constructor(url?: string) {
-    // .env VITE_WS_URL 或默认同源（Vite dev 已代理 /ws → 后端）；base 可带可不带 /ws，统一归一
     const envUrl = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_WS_URL;
     const base = (url || envUrl || "").replace(/\/+$/, "").replace(/\/ws$/, "");
     this.url = base
@@ -22,8 +25,7 @@ export class HarnessWS {
       : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
   }
 
-  connect(sessionId = "default") {
-    // 关闭旧连接（detach 回调避免触发重连定时器），支持幂等调用
+  private teardownSocket() {
     if (this.ws) {
       this.ws.onopen = null;
       this.ws.onclose = null;
@@ -40,19 +42,31 @@ export class HarnessWS {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  connect(sessionId = "default") {
+    this.manualClose = false;
+    this.teardownSocket();
     this.sessionId = sessionId;
-    const full = `${this.url}?session_id=${sessionId}`;
+    this.emit("connection", { state: "connecting" });
+    const full = `${this.url}?session_id=${encodeURIComponent(sessionId)}`;
     this.ws = new WebSocket(full);
-    this.ws.onopen = () => this.emit("connection", { state: "connected" });
+    this.ws.onopen = () => {
+      this.attempt = 0;
+      this.emit("connection", { state: "connected" });
+      const queued = this.outbound.splice(0);
+      for (const item of queued) {
+        try {
+          this.ws?.send(JSON.stringify(item));
+        } catch {
+          this.outbound.unshift(item);
+          break;
+        }
+      }
+    };
     this.ws.onclose = () => {
       this.emit("connection", { state: "disconnected" });
-      // 简单重连，使用最新会话
-      if (this.reconnectTimer === null) {
-        this.reconnectTimer = window.setTimeout(() => {
-          this.reconnectTimer = null;
-          this.connect(this.sessionId);
-        }, 2000);
-      }
+      if (!this.manualClose) this.scheduleReconnect();
     };
     this.ws.onerror = () => this.emit("connection", { state: "error" });
     this.ws.onmessage = (e) => {
@@ -67,6 +81,17 @@ export class HarnessWS {
     };
   }
 
+  private scheduleReconnect() {
+    if (this.reconnectTimer !== null || this.manualClose) return;
+    const delay = Math.min(15000, 1000 * 2 ** Math.min(this.attempt, 4));
+    this.attempt += 1;
+    this.emit("connection", { state: "connecting" });
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.manualClose) this.connect(this.sessionId);
+    }, delay);
+  }
+
   setSession(sessionId: string) {
     this.sessionId = sessionId;
   }
@@ -74,7 +99,15 @@ export class HarnessWS {
   send(event: string, payload: Record<string, unknown> = {}) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ event, payload }));
+      return true;
     }
+    if (this.manualClose) return false;
+    if (this.outbound.length >= 50) this.outbound.shift();
+    this.outbound.push({ event, payload });
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      this.connect(this.sessionId);
+    }
+    return false;
   }
 
   on(event: string, cb: (payload: Record<string, unknown>) => void) {
@@ -89,12 +122,9 @@ export class HarnessWS {
   }
 
   close() {
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.ws?.close();
-    this.ws = null;
+    this.manualClose = true;
+    this.outbound = [];
+    this.teardownSocket();
   }
 }
 

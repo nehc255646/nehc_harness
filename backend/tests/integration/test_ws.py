@@ -3,10 +3,25 @@
 import json
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.agent.executor import Executor
 from app.core.config import settings
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _demo_executor(monkeypatch):
+    """WS 验收走 heuristic，不依赖库里已有的真实模型。"""
+
+    async def _from_session_id(cls, session_id: str):
+        inst = cls()
+        inst.demo = True
+        inst._llm = None
+        return inst
+
+    monkeypatch.setattr(Executor, "from_session_id", classmethod(_from_session_id))
 
 
 def _recv_until(ws, event_name: str):

@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agent.manager import manager
 from app.core import rtstore
 from app.core.config import settings
+from app.core.db import is_available
 from app.core.errors import ErrorCode
 from app.permissions.gate import gate
 
@@ -38,6 +40,22 @@ async def _loop_broadcaster(session_id: str, event: str, payload: dict):
     await broadcast(session_id, event, payload)
 
 
+def _origin_allowed(ws: WebSocket) -> bool:
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True
+    allowed = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
+    if origin in allowed:
+        return True
+    try:
+        host = (urlparse(origin).hostname or "").lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    return host in ("localhost", "127.0.0.1", "::1", "testserver", "testclient")
+
+
 def _detach_connection(ws: WebSocket, session_id: str) -> None:
     """从会话连接表移除，空集一并清理"""
     conns = _connections.get(session_id)
@@ -55,13 +73,29 @@ def _ensure_manager_broadcaster():
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    if not _origin_allowed(ws):
+        await ws.close(code=1008)
+        return
     session_id = ws.query_params.get("session_id", "default")
     _connections.setdefault(session_id, set()).add(ws)
     _ensure_manager_broadcaster()
-    # 确保会话落库 + agent 存在并启动
     from app import persist as persist_mod
 
-    await persist_mod.ensure_session(session_id, assign_default=True)
+    sess = await persist_mod.ensure_session(session_id, assign_default=True)
+    if sess is None and is_available():
+        row = await persist_mod.get_session(session_id)
+        if row is not None and getattr(row, "status", None) == "deleted":
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "event": "error",
+                        "payload": {"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话已删除"},
+                    }
+                )
+            )
+            _detach_connection(ws, session_id)
+            await ws.close(code=1008)
+            return
     agent = await manager.get_or_create(session_id)
     agent.set_broadcaster(_loop_broadcaster)
     logger.info("WS connected: session=%s total=%d state=%s", session_id, len(_connections[session_id]), agent.state)
@@ -107,7 +141,20 @@ async def ws_endpoint(ws: WebSocket):
             elif event == "approval.response":
                 approval_id = payload.get("approval_id")
                 decision = payload.get("decision")  # approve | approve_similar | reject
-                # 归一化
+                pending = gate.get(approval_id) if approval_id else None
+                if pending and pending.session_id != session_id:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "event": "error",
+                                "payload": {
+                                    "code": ErrorCode.INTERNAL,
+                                    "message": "approval 不属于当前会话",
+                                },
+                            }
+                        )
+                    )
+                    continue
                 if decision == "approve":
                     d = "approve"
                 elif decision == "approve_similar":
@@ -169,7 +216,19 @@ async def ws_endpoint(ws: WebSocket):
                 new_sid = payload.get("session_id", session_id)
                 from app import persist as persist_mod
 
-                await persist_mod.ensure_session(new_sid)
+                selected = await persist_mod.ensure_session(new_sid)
+                if selected is None and is_available():
+                    row = await persist_mod.get_session(new_sid)
+                    if row is not None and getattr(row, "status", None) == "deleted":
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "event": "error",
+                                    "payload": {"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话已删除"},
+                                }
+                            )
+                        )
+                        continue
                 _detach_connection(ws, session_id)
                 session_id = new_sid
                 _connections.setdefault(session_id, set()).add(ws)

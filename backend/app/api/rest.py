@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -69,11 +70,26 @@ def _encrypt_api_key(plain: str) -> str:
     return encrypt_secret(text)
 
 
+def _probe_url_error(base_url: str) -> str | None:
+    try:
+        parsed = urlparse(base_url)
+    except Exception:
+        return "base_url 无效"
+    if parsed.scheme not in ("http", "https"):
+        return "base_url 仅支持 http(s)"
+    if not parsed.netloc:
+        return "base_url 缺少主机"
+    return None
+
+
 async def _probe_chat(base_url: str, api_key: str, model_name: str) -> dict:
     """对指定模型发一条 hello，失败也返回 200 + ok=false。"""
     base = (base_url or "").rstrip("/")
     if not base:
         return {"ok": False, "error": "缺少 base_url", "model": model_name}
+    bad = _probe_url_error(base)
+    if bad:
+        return {"ok": False, "error": bad, "model": model_name}
     url = f"{base}/chat/completions" if not base.endswith("/chat/completions") else base
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -91,7 +107,7 @@ async def _probe_chat(base_url: str, api_key: str, model_name: str) -> dict:
                 },
             )
         if resp.status_code >= 400:
-            return {"ok": False, "status": resp.status_code, "error": resp.text[:500], "model": model_name}
+            return {"ok": False, "status": resp.status_code, "error": f"HTTP {resp.status_code}", "model": model_name}
         data = resp.json()
         text = ""
         try:

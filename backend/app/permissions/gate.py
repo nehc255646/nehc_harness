@@ -7,6 +7,21 @@ from dataclasses import dataclass
 
 logger = logging.getLogger("harness.gate")
 
+_ALLOWED_RULE_KINDS = {"shell_prefix", "tool"}
+
+
+def sanitize_session_rule(rule: dict) -> dict | None:
+    """只接受 kind=shell_prefix|tool 且 pattern 非空的规则。"""
+    if not isinstance(rule, dict):
+        return None
+    kind = rule.get("kind")
+    pattern = str(rule.get("pattern") or "").strip()
+    if kind not in _ALLOWED_RULE_KINDS or not pattern:
+        return None
+    if len(pattern) > (64 if kind == "tool" else 256):
+        return None
+    return {"kind": kind, "pattern": pattern}
+
 
 @dataclass
 class PendingApproval:
@@ -34,10 +49,14 @@ class ApprovalGate:
         return list(self._session_rules.get(session_id, []))
 
     def add_session_rule(self, session_id: str, rule: dict, persist: bool = True) -> None:
+        clean = sanitize_session_rule(rule)
+        if not clean:
+            logger.warning("Ignore invalid session rule: %s %s", session_id, rule)
+            return
         lst = self._session_rules.setdefault(session_id, [])
-        if rule not in lst:
-            lst.append(rule)
-            logger.info("Session rule added: %s %s", session_id, rule)
+        if clean not in lst:
+            lst.append(clean)
+            logger.info("Session rule added: %s %s", session_id, clean)
         if persist:
             self._persist_rules(session_id)
 

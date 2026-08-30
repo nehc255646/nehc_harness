@@ -50,6 +50,24 @@ def test_edit_unique_and_ambiguous():
     assert read.invoke({"path": path}) == "baz"
 
 
+def test_grep_skips_symlink_escape(tmp_path):
+    import os
+
+    from app.tools.files import _workdir
+
+    wd = _workdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("SECRET_TOKEN_XYZ\n")
+    link = wd / f"{_UNIQUE}_link.txt"
+    try:
+        os.symlink(str(outside), str(link))
+        r = grep.invoke({"pattern": "SECRET_TOKEN_XYZ", "path": "."})
+        assert "SECRET_TOKEN_XYZ" not in r
+    finally:
+        if link.exists() or link.is_symlink():
+            link.unlink()
+
+
 def test_glob_embedded_traversal_filtered():
     # 内嵌 ../ 的模式不允许枚举 WORKDIR 外文件（即使不以 ../ 开头）
     sub = f"sub_{uuid.uuid4().hex[:8]}"

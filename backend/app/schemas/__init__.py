@@ -19,6 +19,15 @@ def _normalize_env_name(value: str | None) -> str | None:
     return name
 
 
+def _normalize_api_key_env(value: str | None) -> str | None:
+    name = _normalize_env_name(value)
+    if name is None:
+        return None
+    if not name.upper().endswith("_API_KEY"):
+        raise ValueError("环境变量名须以 _API_KEY 结尾")
+    return name
+
+
 class ProviderCreate(BaseModel):
     provider_id: str = Field(pattern=PROVIDER_SLUG, max_length=64)
     display_name: str = Field(min_length=1, max_length=128)
@@ -30,7 +39,7 @@ class ProviderCreate(BaseModel):
     @field_validator("api_key_env")
     @classmethod
     def _env_name(cls, v: str | None) -> str | None:
-        return _normalize_env_name(v)
+        return _normalize_api_key_env(v)
 
     @model_validator(mode="after")
     def _env_required(self):
@@ -51,7 +60,7 @@ class ProviderUpdate(BaseModel):
     @field_validator("api_key_env")
     @classmethod
     def _env_name(cls, v: str | None) -> str | None:
-        return _normalize_env_name(v)
+        return _normalize_api_key_env(v)
 
     @model_validator(mode="after")
     def _env_required(self):
@@ -190,4 +199,4 @@ class LlmProbeBody(BaseModel):
     @field_validator("api_key_env")
     @classmethod
     def _env_name(cls, v: str | None) -> str | None:
-        return _normalize_env_name(v)
+        return _normalize_api_key_env(v)

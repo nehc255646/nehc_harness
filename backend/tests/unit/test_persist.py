@@ -16,6 +16,7 @@ from app.persist import (
     pending_count,
     save_message,
     save_tool_log,
+    update_session_fields,
 )
 
 
@@ -212,6 +213,17 @@ async def test_flush_pending_drops_after_five(monkeypatch):
     monkeypatch.setattr(persist_mod, "save_message", boom)
     await persist_mod.flush_pending()
     assert persist_mod.pending_count() == 0
+
+
+async def test_ensure_session_skips_deleted(db_ready):
+    sid = f"del_{uuid.uuid4().hex[:12]}"
+    row = await ensure_session(sid, title="to-delete")
+    assert row is not None
+    await update_session_fields(sid, status="deleted")
+    again = await ensure_session(sid, title="resurrect")
+    assert again is None
+    hist, _, _ = await load_history(sid)
+    assert hist == []
 
 
 async def test_flush_pending_noop_when_empty(db_ready):

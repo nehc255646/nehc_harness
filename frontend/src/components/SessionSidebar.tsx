@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { wsClient } from "../api/ws";
 import { useAgentStore } from "../store/agentStore";
 import { IconBolt, IconChevron, IconPlus, IconTrash } from "./icons";
 
@@ -21,13 +20,12 @@ export default function SessionSidebar({
   onClose: () => void;
   onToggleCollapsed: () => void;
 }) {
-  const { sessionId, sessionRows, deleteSession, renameSession, agentState, messages, toolCalls } =
+  const { sessionId, sessionRows, deleteSession, renameSession, agentState, selectSession, createSession } =
     useAgentStore();
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [createHint, setCreateHint] = useState("");
   const rail = collapsed && !mobileOpen;
-  const alreadyNew = messages.length === 0 && toolCalls.length === 0;
 
   useEffect(() => {
     if (!createHint) return;
@@ -42,12 +40,8 @@ export default function SessionSidebar({
   };
 
   const onCreateSession = () => {
-    if (alreadyNew) {
-      setCreateHint("已在新对话中");
-      return;
-    }
     setCreateHint("");
-    wsClient.send("session.create", { title: "New Session" });
+    createSession();
   };
 
   return (
@@ -103,8 +97,8 @@ export default function SessionSidebar({
           type="button"
           onClick={onCreateSession}
           className={rail ? "ui-btn-primary h-9 w-full p-0" : "ui-btn-primary w-full"}
-          title={alreadyNew ? "已在新对话中" : "新建会话"}
-          aria-label={alreadyNew ? "已在新对话中" : "新建会话"}
+          title="新建会话"
+          aria-label="新建会话"
         >
           <IconPlus className="h-4 w-4" />
           {!rail && "新建会话"}
@@ -166,7 +160,7 @@ export default function SessionSidebar({
                 <button
                   className="min-w-0 flex-1 text-left"
                   onClick={() => {
-                    if (s.id !== sessionId) wsClient.send("session.select", { session_id: s.id });
+                    if (s.id !== sessionId) selectSession(s.id);
                     onClose();
                   }}
                   onDoubleClick={() => {
@@ -186,7 +180,9 @@ export default function SessionSidebar({
               )}
               <button
                 className="ml-1 hidden rounded-md p-1 text-faint hover:bg-red-950/50 hover:text-red-300 group-hover:block"
-                onClick={() => deleteSession(s.id)}
+                onClick={() => {
+                  if (window.confirm(`删除会话「${s.title || s.id.slice(0, 8)}」？`)) void deleteSession(s.id);
+                }}
                 title="删除"
               >
                 <IconTrash />

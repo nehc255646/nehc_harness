@@ -58,12 +58,12 @@ def test_provider_model_session_flow():
                 "display_name": "Env Provider",
                 "base_url": "https://example.invalid/v1",
                 "api_key_from_env": True,
-                "api_key_env": "MY_CUSTOM_KEY",
+                "api_key_env": "MY_CUSTOM_API_KEY",
             },
         )
         assert env_p.status_code == 200, env_p.text
         assert env_p.json()["api_key_from_env"] is True
-        assert env_p.json()["api_key_env"] == "MY_CUSTOM_KEY"
+        assert env_p.json()["api_key_env"] == "MY_CUSTOM_API_KEY"
         env_pid = env_p.json()["id"]
         env_probe = client.post(
             "/api/llm/probe",
@@ -71,12 +71,31 @@ def test_provider_model_session_flow():
                 "base_url": "https://example.invalid/v1",
                 "model_id": "demo-model",
                 "api_key_from_env": True,
-                "api_key_env": "MISSING_VAR_XYZ",
+                "api_key_env": "MISSING_VAR_XYZ_API_KEY",
             },
         )
         assert env_probe.status_code == 200
         assert env_probe.json()["ok"] is False
-        assert "MISSING_VAR_XYZ" in (env_probe.json().get("error") or "")
+        assert "MISSING_VAR_XYZ_API_KEY" in (env_probe.json().get("error") or "")
+
+        bad_env = client.post(
+            "/api/llm/probe",
+            json={
+                "base_url": "https://example.invalid/v1",
+                "model_id": "demo-model",
+                "api_key_from_env": True,
+                "api_key_env": "ENCRYPTION_KEY",
+            },
+        )
+        assert bad_env.status_code == 422
+
+        bad_url = client.post(
+            "/api/llm/probe",
+            json={"base_url": "file:///etc/passwd", "model_id": "demo-model"},
+        )
+        assert bad_url.status_code == 200
+        assert bad_url.json()["ok"] is False
+        assert "http" in (bad_url.json().get("error") or "")
 
         missing = client.post(f"/api/providers/{pid}/test", json={})
         assert missing.status_code == 422
@@ -112,8 +131,10 @@ def test_provider_model_session_flow():
 
         s = client.post("/api/sessions", json={"title": "M3 session"})
         assert s.status_code == 200, s.text
-        # 新建会话应解析兜底模型
-        assert s.json()["model_id"] == mid
+        resolved = client.get("/api/models/resolved-default").json()
+        want = (resolved.get("model") or {}).get("id")
+        assert s.json()["model_id"] == want
+        assert want is not None
         assert s.json().get("work_mode", "auto") == "auto"
         sid = s.json()["id"]
 

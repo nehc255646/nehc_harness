@@ -26,10 +26,12 @@ class Settings(BaseSettings):
     # Security — 必须由 .env 提供（Fernet 生成命令见 .env.example），留空时启动告警
     encryption_key: str = ""
 
-    # Server
-    host: str = "0.0.0.0"
+    # Server — 默认本机回环；对外暴露需显式 HOST=0.0.0.0
+    host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    llm_timeout: int = 180
 
     # Agent
     workdir: str = "./workspace"

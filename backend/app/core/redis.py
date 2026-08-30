@@ -1,6 +1,7 @@
 """Redis 客户端 — 连不上仅告警，不阻塞启动"""
 
 import logging
+from urllib.parse import urlparse, urlunparse
 
 import redis.asyncio as redis
 
@@ -11,6 +12,16 @@ logger = logging.getLogger("harness.redis")
 _client: redis.Redis | None = None
 
 
+def _safe_redis_url(url: str) -> str:
+    u = urlparse(url)
+    if not u.password:
+        return url
+    host = u.hostname or ""
+    auth = f"{u.username}:***@" if u.username else "***@"
+    port = f":{u.port}" if u.port else ""
+    return urlunparse((u.scheme, f"{auth}{host}{port}", u.path, "", "", ""))
+
+
 async def get_redis() -> redis.Redis | None:
     global _client
     if _client is not None:
@@ -18,7 +29,7 @@ async def get_redis() -> redis.Redis | None:
     try:
         _client = redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
         await _client.ping()
-        logger.info("Redis connected: %s", settings.redis_url)
+        logger.info("Redis connected: %s", _safe_redis_url(settings.redis_url))
         return _client
     except Exception as e:
         logger.warning("Redis unavailable (%s): %s — running without Redis", settings.redis_url, e)

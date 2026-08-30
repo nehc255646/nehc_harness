@@ -31,12 +31,15 @@ export default function Chat() {
   const [pickedModelId, setPickedModelId] = useState<number | null>(null);
   const [pickerErr, setPickerErr] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   if (pickedSession !== sessionId) {
     setPickedSession(sessionId);
     setPickedProviderId(null);
     setPickedModelId(null);
+    setInput("");
   }
 
   const providerOpts = useMemo(() => {
@@ -92,7 +95,7 @@ export default function Chat() {
   };
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    if (stickRef.current) bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, toolCalls, pendingApprovals, agentState]);
 
   const resize = () => {
@@ -104,7 +107,15 @@ export default function Chat() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        ref={scrollerRef}
+        onScroll={() => {
+          const el = scrollerRef.current;
+          if (!el) return;
+          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }}
+      >
         {messages.length === 0 && toolCalls.length === 0 ? (
           <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 text-center">
             <div className="mb-3 text-2xl font-semibold tracking-tight">
@@ -229,7 +240,7 @@ export default function Chat() {
                 resize();
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   void onSend();
                 }

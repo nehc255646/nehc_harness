@@ -4,7 +4,12 @@ import asyncio
 
 from app.agent import subagent as sa
 from app.agent.loop import AgentLoop
-from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT, SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
+from app.agent.prompts import (
+    INTERACTIVE_SYSTEM_PROMPT,
+    PLAN_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    WORKER_SYSTEM_PROMPT,
+)
 from app.core.config import settings
 from app.tools.registry import PLAN_TOOLS, TOOLS
 

@@ -88,6 +88,8 @@ async def ensure_session(
                 return None
             row = await db.get(ChatSession, session_id)
             if row:
+                if row.status == "deleted":
+                    return None
                 if title and row.title in ("New Session", f"Session {session_id[:8]}"):
                     row.title = title
                 return row

@@ -129,6 +129,15 @@ async def test_hello_restores_rules_from_redis(fake_redis):
     assert g.get_session_rules(sid) == [{"kind": "tool", "pattern": "write"}]
 
 
+def test_sanitize_session_rule_rejects_garbage():
+    from app.permissions.gate import sanitize_session_rule
+
+    assert sanitize_session_rule({"kind": "tool", "pattern": "shell"}) == {"kind": "tool", "pattern": "shell"}
+    assert sanitize_session_rule({"kind": "all", "pattern": "shell"}) is None
+    assert sanitize_session_rule({"kind": "tool", "pattern": ""}) is None
+    assert sanitize_session_rule("not-a-dict") is None
+
+
 async def test_gate_request_mirrors_pending(fake_redis):
     g = ApprovalGate()
     aid, fut = await g.request_approval("s6", "main", "shell", {"command": "echo hi"}, "reason")
