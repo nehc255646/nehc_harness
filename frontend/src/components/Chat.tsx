@@ -10,6 +10,11 @@ const EXAMPLES_PLAN = ["阅读工作区结构", "说明当前代码如何启动"
 const COL = "mx-auto w-full max-w-6xl px-4 sm:px-6";
 
 export default function Chat() {
+  const sessionId = useAgentStore((s) => s.sessionId);
+  return <ChatSession key={sessionId} />;
+}
+
+function ChatSession() {
   const {
     messages,
     toolCalls,
@@ -18,15 +23,15 @@ export default function Chat() {
     sendBlockedReason,
     models,
     modelId,
-    sessionId,
     setSessionModel,
     setSessionWorkMode,
     workMode,
     respondApproval,
     agentState,
+    sessionAllowRules,
+    revokeAllowRule,
   } = useAgentStore();
   const [input, setInput] = useState("");
-  const [pickedSession, setPickedSession] = useState(sessionId);
   const [pickedProviderId, setPickedProviderId] = useState<number | null>(null);
   const [pickedModelId, setPickedModelId] = useState<number | null>(null);
   const [pickerErr, setPickerErr] = useState("");
@@ -34,13 +39,6 @@ export default function Chat() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-
-  if (pickedSession !== sessionId) {
-    setPickedSession(sessionId);
-    setPickedProviderId(null);
-    setPickedModelId(null);
-    setInput("");
-  }
 
   const providerOpts = useMemo(() => {
     const map = new Map<number, string>();
@@ -207,6 +205,9 @@ export default function Chat() {
             {agentState === "awaiting_approval" && pendingApprovals.length === 0 && (
               <p className="text-center text-xs text-amber-400">等待审批…</p>
             )}
+            {agentState === "awaiting_workers" && (
+              <p className="text-center text-xs text-amber-400">等待工人完成…</p>
+            )}
             <div ref={bottomRef} />
           </div>
         )}
@@ -214,6 +215,23 @@ export default function Chat() {
 
       <div className="border-t border-[var(--color-border)] bg-surface/60 py-3 backdrop-blur">
         <div className={COL}>
+          {sessionAllowRules.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] text-faint">会话放行</span>
+              {sessionAllowRules.map((r) => (
+                <button
+                  key={`${r.kind}:${r.pattern}`}
+                  type="button"
+                  onClick={() => revokeAllowRule(r.kind, r.pattern)}
+                  className="rounded-full border border-[var(--color-border)] bg-surface px-2 py-0.5 font-mono text-[10px] text-muted hover:border-red-500/40 hover:text-red-300"
+                  title="撤销这条放行"
+                >
+                  {r.kind === "shell_prefix" ? r.pattern : r.pattern}
+                  <span className="ml-1 text-faint">×</span>
+                </button>
+              ))}
+            </div>
+          )}
           {pendingApprovals[0] && (
             <ApprovalModal key={pendingApprovals[0].approval_id} approval={pendingApprovals[0]} onRespond={respondApproval} />
           )}

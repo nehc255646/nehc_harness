@@ -22,6 +22,7 @@ const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
   running: "运行中",
   awaiting_approval: "待审批",
+  awaiting_workers: "等待工人",
   done: "完成",
   error: "出错",
 };
@@ -55,6 +56,7 @@ export default function App() {
   const busy =
     agentState === "running" ||
     agentState === "awaiting_approval" ||
+    agentState === "awaiting_workers" ||
     workers.some((w) => w.state === "running") ||
     subPanels.some((p) => p.status === "running");
   const heading = sessionTitle || sessionRows.find((s) => s.id === sessionId)?.title || "Neharness";

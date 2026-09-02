@@ -208,6 +208,42 @@ async def test_unresolved_executor_does_not_heuristic():
     await ag.stop()
 
 
+async def test_live_model_error_does_not_heuristic():
+    ag = AgentLoop("ut_live_err")
+    ag.executor.demo = False
+    ag.executor._llm = object()
+    heuristic_hits: list[int] = []
+    orig = ag._heuristic_fallback
+
+    def wrapped(messages):
+        heuristic_hits.append(1)
+        return orig(messages)
+
+    ag._heuristic_fallback = wrapped  # type: ignore[method-assign]
+    errors: list[dict] = []
+
+    async def boom(_messages):
+        raise RuntimeError("upstream 500")
+
+    ag._call_model = boom  # type: ignore[method-assign]
+
+    async def capture(_sid, event, payload):
+        if event == "error":
+            errors.append(payload)
+
+    ag.set_broadcaster(capture)
+    await ag.start()
+    await ag.enqueue({"type": "user_message", "content": "hello"})
+    for _ in range(80):
+        await asyncio.sleep(0.02)
+        if errors or ag.state == "error":
+            break
+    assert ag.state == "error"
+    assert heuristic_hits == []
+    assert any(e.get("code") == "MODEL_ERROR" or getattr(e.get("code"), "value", None) == "MODEL_ERROR" for e in errors)
+    await ag.stop()
+
+
 async def test_worker_single_batch_completes_and_cleans():
     """单 worker 完成后批次聚合并清理，结果回投主 agent 队列"""
     import uuid
@@ -222,19 +258,15 @@ async def test_worker_single_batch_completes_and_cleans():
 
     gate.add_session_rule(sid, {"kind": "shell_prefix", "pattern": "echo"})
     try:
-        res = await sa.spawn_worker_batch(sid, ["列出演示目录"], [], None, None, capture_enqueue, lambda _sid: None)
-        assert "已派生" in res
-        wid = sa.get_workers(sid)[0]["subagent_id"]
-        batch_id = sa.get_workers(sid)[0]["batch_id"]
-        for _ in range(100):
-            await asyncio.sleep(0.05)
-            if sa.get_workers(sid)[0]["state"] != "running":
-                break
-        assert sa.get_workers(sid)[0]["state"] == "done"
-        assert batch_id not in sa._batches, "批次完成后应清理"
-        assert got, "batch_done 应回投主 agent 队列"
-        assert got[0]["type"] == "worker_batch_done"
-        assert got[0]["payload"]["workers"][0]["subagent_id"] == wid
+        res = await sa.spawn_worker_batch(
+            sid, ["列出演示目录"], [], None, None, capture_enqueue, lambda _sid: None, wait=True
+        )
+        assert '"type": "worker_batch"' in res
+        assert got == [], "阻塞派生的报告走 tool 结果，不注入主队列"
+        workers = sa.get_workers(sid)
+        assert workers
+        assert workers[0]["state"] == "done"
+        assert "列出演示目录" in res
     finally:
         await sa.stop_session_subagents(sid)
         sa.purge_session(sid)
@@ -282,7 +314,9 @@ def test_heuristic_plan_does_not_emit_shell():
 async def test_spawn_rejects_task_equal_to_user_goal():
     ag = AgentLoop("ut_spawn_clone")
     ag.history = [{"role": "user", "content": "重构整个工作区"}]
-    res = await ag._handle_spawn_tool("spawn_worker", {"task": "重构整个工作区"})
+    res = await ag._handle_spawn_tool(
+        "spawn_worker", {"task": "重构整个工作区", "done_when": "所有文件已重写"}
+    )
     assert "拒绝" in res
     assert ag._turn_spawned == 0
 
@@ -353,7 +387,9 @@ async def test_manager_stop_halts_workers():
     async def noop_enqueue(_ev):
         return None
 
-    res = await sa.spawn_worker_batch(sid, ["sleep 8"], [], None, None, noop_enqueue, mgr.get)
+    res = await sa.spawn_worker_batch(
+        sid, ["sleep 8"], [], None, None, noop_enqueue, mgr.get, wait=False
+    )
     assert "已派生" in res
     wid = sa.get_workers(sid)[0]["subagent_id"]
     await asyncio.sleep(0.15)
@@ -401,3 +437,70 @@ async def test_spawn_lock_respects_concurrency(monkeypatch):
     assert "拒绝" in second
     await sa.stop_session_subagents(sid)
     await asyncio.sleep(0.2)
+
+
+async def test_finish_task_blocked_same_turn_as_spawn():
+    ag = AgentLoop("ut_fin_spawn")
+    out = await ag._dispatch_tools(
+        [
+            {"id": "s1", "name": "spawn_worker", "args": {"task": "x"}},
+            {"id": "f1", "name": "finish_task", "args": {"message": "done"}},
+        ]
+    )
+    assert out[0]["is_error"] is True
+    assert out[1]["is_error"] is True
+    assert "同一轮" in out[1]["result"]
+
+
+async def test_spawn_requires_explore_when_live_llm():
+    ag = AgentLoop("ut_need_explore")
+    ag.history = [{"role": "user", "content": "实现登录和支付"}]
+    ag.executor.demo = False
+    ag.executor._llm = object()
+    res = await ag._handle_spawn_tool(
+        "spawn_worker",
+        {"task": "改 auth.py 校验", "done_when": "校验有单测", "files": ["auth.py"]},
+    )
+    assert "摸清" in res
+    assert ag._turn_spawned == 0
+
+
+async def test_explore_worker_blocks_write():
+    loop = sa.SubAgentLoop(
+        session_id="ut_wk_explore",
+        subagent_id="wk_ex1",
+        kind="worker",
+        task="读 auth.py",
+        behavior_desc="",
+        snapshot=[],
+        summary=None,
+        broadcaster=None,
+        main_enqueue=None,
+        mode="explore",
+    )
+    out = await loop._dispatch_worker_tools(
+        [{"id": "c1", "name": "write", "args": {"path": "a.txt", "content": "x"}}]
+    )
+    assert out[0]["is_error"] is True
+    assert "explore" in out[0]["result"] or "只读" in out[0]["result"]
+
+
+async def test_worker_files_scope_blocks_write():
+    loop = sa.SubAgentLoop(
+        session_id="ut_wk_scope",
+        subagent_id="wk_sc1",
+        kind="worker",
+        task="改 auth.py",
+        behavior_desc="",
+        snapshot=[],
+        summary=None,
+        broadcaster=None,
+        main_enqueue=None,
+        files=["auth.py"],
+        mode="implement",
+    )
+    out = await loop._dispatch_worker_tools(
+        [{"id": "c1", "name": "write", "args": {"path": "other.py", "content": "x"}}]
+    )
+    assert out[0]["is_error"] is True
+    assert "范围" in out[0]["result"]

@@ -166,9 +166,12 @@ async def test_per_turn_spawn_limit():
     ag = AgentLoop("ut_limit")
     assert ag._turn_spawned == 0
     ag._turn_spawned = settings.max_workers_per_turn
-    res1 = await ag._handle_spawn_tool("spawn_worker", {"task": "t"})
+    res1 = await ag._handle_spawn_tool("spawn_worker", {"task": "t", "done_when": "完成切片 t"})
     assert "拒绝" in res1
-    res2 = await ag._handle_spawn_tool("spawn_workers", {"tasks": ["a", "b", "c"]})
+    res2 = await ag._handle_spawn_tool(
+        "spawn_workers",
+        {"tasks": ["a", "b", "c"], "done_when": ["完成 a", "完成 b", "完成 c"]},
+    )
     assert "拒绝" in res2
     assert ag._turn_spawned == settings.max_workers_per_turn, "被拒请求不应累计"
 
@@ -234,6 +237,20 @@ async def test_approve_similar_empty_shell_adds_no_rule():
     approved, decision, _reason = await fut
     assert approved is True
     assert decision == "approve_similar"
+
+
+async def test_remove_session_rule():
+    from app.permissions.gate import gate
+
+    sid = "ut_revoke_rule"
+    gate.clear_session_rules(sid)
+    gate.add_session_rule(sid, {"kind": "shell_prefix", "pattern": "echo hello"}, persist=False)
+    gate.add_session_rule(sid, {"kind": "tool", "pattern": "write"}, persist=False)
+    assert gate.remove_session_rule(sid, "shell_prefix", "echo hello", persist=False) is True
+    rules = gate.get_session_rules(sid)
+    assert rules == [{"kind": "tool", "pattern": "write"}]
+    assert gate.remove_session_rule(sid, "shell_prefix", "echo hello", persist=False) is False
+    gate.clear_session_rules(sid)
 
 
 async def test_empty_shell_skips_approval():

@@ -24,6 +24,12 @@ from app.agent.context import (
 )
 from app.agent.executor import Executor
 from app.agent.prompts import PLAN_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT, SYSTEM_PROMPT
+from app.agent.spawn_policy import (
+    format_batch_report,
+    history_has_readonly_explore,
+    parse_worker_specs,
+    validate_worker_tasks,
+)
 from app.agent.stream import ThinkTagSplitter, iter_channels
 from app.core import rtstore
 from app.core.config import settings
@@ -165,6 +171,12 @@ class AgentLoop:
                 self.set_work_mode(getattr(row, "work_mode", None))
         except Exception:
             logger.debug("hydrate work_mode failed", exc_info=True)
+        try:
+            rules = await persist_mod.load_session_allow_rules(self.session_id)
+            if rules:
+                gate.replace_session_rules(self.session_id, rules, persist=False)
+        except Exception:
+            logger.debug("hydrate allow_rules failed", exc_info=True)
 
     def _ensure_running(self):
         if self._task is None or self._task.done():
@@ -299,8 +311,11 @@ class AgentLoop:
                     result = await self._call_model(messages)
                 except Exception as e:
                     logger.exception("Model call failed")
-                    # 已选模型解析失败不走演示；其余模型错误才 heuristic
-                    if getattr(self.executor, "unresolved", False):
+                    live = bool(getattr(self.executor, "_llm", None)) and not getattr(
+                        self.executor, "demo", False
+                    )
+                    # 已选真实模型或无法解析时不掉进 heuristic 演示
+                    if getattr(self.executor, "unresolved", False) or live:
                         await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
                         await self._set_state("error")
                         try:
@@ -317,7 +332,6 @@ class AgentLoop:
                     except Exception:
                         await self._broadcast("error", {"code": ErrorCode.MODEL_ERROR, "message": str(e)})
                         await self._set_state("error")
-                        # 等待新消息唤醒，避免空转
                         try:
                             event = await self.queue.get()
                             await self._handle_incoming(event)
@@ -352,8 +366,6 @@ class AgentLoop:
                 # 5. tool_calls 分支：文本只随 assistant_msg 入 history，避免重复记录
                 if text and not already_streamed:
                     await self._emit_message(text, done=True, record=False)
-                # 检查 finish_task
-                has_finish = any(tc.get("name") == "finish_task" for tc in tool_calls)
                 # 并行分发
                 if not self._current_message_id:
                     self._current_message_id = str(uuid.uuid4())
@@ -390,7 +402,10 @@ class AgentLoop:
                     )
                 # 大结果截断已在 dispatch 内处理
 
-                if has_finish:
+                finish_ok = any(
+                    tr.get("name") == "finish_task" and not tr.get("is_error") for tr in tool_results
+                )
+                if finish_ok:
                     fin = next((tc for tc in tool_calls if tc.get("name") == "finish_task"), None)
                     fin_args = normalize_tool_args((fin or {}).get("args") or {})
                     fin_msg = str(fin_args.get("message") or "").strip()
@@ -449,18 +464,13 @@ class AgentLoop:
             if self.state in ("idle", "done", "error"):
                 await self._set_state("running")
         elif etype == "worker_batch_done":
-            # M2 工作型批量聚合回投
+            # 非阻塞派生的兜底通道（生产路径 wait=True 时结果走 spawn_* tool 结果）
             payload = event.get("payload") or {}
-            batch_id = payload.get("batch_id", "")
             workers = payload.get("workers") or []
-            lines = []
-            for w in workers:
-                lines.append(f"- {w.get('subagent_id')} [{w.get('status')}]: {w.get('result','')[:500]}")
-            content = f"[工作型批量完成] batch_id={batch_id}\n" + "\n".join(lines)
+            content = "[系统·工人批次完成]\n" + format_batch_report(workers)
             self.history.append({"role": "user", "content": content})
             await self._persist_message("user", content)
             self._turn_spawned = 0
-            # 聚合事件也广播，供前端 worker.batch_done 已由子 agent 广播，此处仅注入上下文
             if self.state in ("idle", "done", "error"):
                 await self._set_state("running")
         elif etype == "stop":
@@ -727,9 +737,9 @@ class AgentLoop:
         last_user_lower = last_user.lower()
 
         # 回投聚合消息不触发新派生，避免无限递归
-        if last_user.startswith(("[工作型批量完成]", "[子 agent 结果")):
+        if last_user.startswith(("[工作型批量完成]", "[子 agent 结果", "[系统·工人批次完成]")):
             return {"text": f"已收到批量回投：{last_user[:200]}", "tool_calls": []}
-        if last_user.startswith(("[交互型", "[迟到")):
+        if last_user.startswith(("[交互型", "[迟到", "[系统·迟到工人结果")):
             return {"text": "已知交互结果", "tool_calls": []}
 
         if self.work_mode == "plan":
@@ -759,7 +769,11 @@ class AgentLoop:
                 "text": "准备派生两个互不重叠的演示工人：",
                 "tool_calls": [{
                     "name": "spawn_workers",
-                    "args": {"tasks": ["列出 workspace 顶层文件名", "读取 hello.txt（若存在）"]},
+                    "args": {
+                        "tasks": ["列出 workspace 顶层文件名", "读取 hello.txt（若存在）"],
+                        "done_when": ["得到顶层文件名列表", "得到 hello.txt 内容或确认不存在"],
+                        "mode": "explore",
+                    },
                     "id": str(uuid.uuid4()),
                 }],
             }
@@ -768,7 +782,11 @@ class AgentLoop:
                 "text": "准备派生一个窄范围演示工人：",
                 "tool_calls": [{
                     "name": "spawn_worker",
-                    "args": {"task": "列出 workspace 顶层文件名"},
+                    "args": {
+                        "task": "列出 workspace 顶层文件名",
+                        "done_when": "得到顶层文件名列表",
+                        "mode": "explore",
+                    },
                     "id": str(uuid.uuid4()),
                 }],
             }
@@ -829,6 +847,8 @@ class AgentLoop:
     async def _dispatch_tools(self, tool_calls: list[dict]) -> list[dict]:
         """按序分发工具，经 policy 判定，审批走 Future（同类放行可作用于本轮后续调用）"""
 
+        round_has_spawn = any((tc.get("name") or "") in SPAWN_TOOLS for tc in tool_calls)
+
         async def _run_one(tc: dict) -> dict:
             call_id = tc.get("id") or ""
             name = tc.get("name") or ""
@@ -851,6 +871,18 @@ class AgentLoop:
                         "call_id": call_id, "name": name, "args": args,
                         "message_id": self._current_message_id,
                     })
+                    from app.agent.subagent import get_active_worker_count
+
+                    if round_has_spawn:
+                        result = "[拒绝] spawn_* 与 finish_task 不能同一轮。先根据工人报告聚合，下一轮再 finish_task。"
+                        await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                        await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", "spawn_same_turn")
+                        return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                    if get_active_worker_count(self.session_id) > 0:
+                        result = "[拒绝] 仍有工人在运行，禁止 finish_task。等待 spawn_* 工具结果后再收工。"
+                        await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": True})
+                        await self._persist_tool_log(name, args, result, call_id, True, 0, "blocked", "workers_running")
+                        return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                     result = f"[完成] {args.get('message', '任务完成')}"
                     await self._broadcast("tool.result", {"call_id": call_id, "result": result, "is_error": False})
                     await self._persist_tool_log(name, args, result, call_id, False, 0, "config_allow")
@@ -994,49 +1026,55 @@ class AgentLoop:
             from app.agent.subagent import spawn_worker_batch
         except Exception as e:
             return f"[错误] 子 agent 模块未就绪: {e}"
-        # 获取主 agent 唤醒入口与 broadcaster（传 enqueue 而非裸 queue，保证终态后回投可唤醒）
-        broadcaster = self.broadcaster
-        # 防全量转包：按轮累计派生数（检查+累加间无 await，事件循环内原子）
-        if name == "spawn_worker":
-            requested = 1
-        elif name == "spawn_workers":
-            tasks = args.get("tasks") or []
-            requested = len(tasks)
-        else:
-            requested = 0
+        if name == "spawn_subagent":
+            return "[拒绝] 交互型子 agent 需由用户从顶栏打开，主 agent 不能派生"
+        specs, err = parse_worker_specs(name, args)
+        if err:
+            return err
+        requested = len(specs)
         if requested and self._turn_spawned + requested > settings.max_workers_per_turn:
             return (
                 f"[拒绝] 单轮派生工作型总数不超过 {settings.max_workers_per_turn}，"
                 f"本轮已派生 {self._turn_spawned}，再请求 {requested}"
             )
-        if name == "spawn_subagent":
-            return "[拒绝] 交互型子 agent 需由用户从顶栏打开，主 agent 不能派生"
-        elif name == "spawn_worker":
-            task = args.get("task") or ""
-            constraints = args.get("constraints") or ""
-            if not task:
-                return "[错误] spawn_worker 需提供 task"
-            # 检查+占用原子（无 await），并行 spawn 不超限；失败回滚
-            self._turn_spawned += requested
+        try:
+            from app.agent.subagent import running_worker_tasks as _running_worker_tasks
+        except Exception:
+            def _running_worker_tasks(_sid: str) -> list:
+                return []
+        bad = validate_worker_tasks(specs, self.history, _running_worker_tasks(self.session_id))
+        if bad:
+            return bad
+        live_llm = bool(getattr(self.executor, "_llm", None)) and not getattr(self.executor, "demo", False)
+        if live_llm and not history_has_readonly_explore(self.history):
+            return "[拒绝] 派生工人前须先自己用 read/glob/grep 摸清现场。不要一上来转包。"
+        constraints = args.get("constraints") or ""
+        self._turn_spawned += requested
+        prev_state = self.state
+        await self._set_state("awaiting_workers")
+        try:
             result = await spawn_worker_batch(
-                self.session_id, [task], self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
+                self.session_id,
+                specs,
+                self.history,
+                self.summary,
+                self.broadcaster,
+                self.enqueue,
+                manager.get,
+                constraints,
+                wait=True,
+                stop_event=self._stop_event,
             )
-            if result.startswith(("[拒绝]", "[错误]")):
-                self._turn_spawned -= requested
-            return result
-        elif name == "spawn_workers":
-            tasks = args.get("tasks") or []
-            constraints = args.get("constraints") or ""
-            if not tasks:
-                return "[错误] spawn_workers 需提供 tasks 数组"
-            self._turn_spawned += requested
-            result = await spawn_worker_batch(
-                self.session_id, tasks, self.history, self.summary, broadcaster, self.enqueue, manager.get, constraints
-            )
-            if result.startswith(("[拒绝]", "[错误]")):
-                self._turn_spawned -= requested
-            return result
-        return f"[错误] 未知 spawn 工具: {name}"
+        except Exception as e:
+            self._turn_spawned -= requested
+            logger.exception("spawn_worker_batch failed")
+            return f"[错误] 派生失败: {e}"
+        finally:
+            if not self._stop_event.is_set() and self.state == "awaiting_workers":
+                await self._set_state(prev_state if prev_state not in ("idle", "done") else "running")
+        if result.startswith(("[拒绝]", "[错误]")):
+            self._turn_spawned -= requested
+        return result
 
     async def _execute_tool(self, name: str, args: dict, call_id: str, decision: str, reason: str) -> dict:
         args = normalize_tool_args(args)

@@ -60,6 +60,35 @@ class ApprovalGate:
         if persist:
             self._persist_rules(session_id)
 
+    def remove_session_rule(self, session_id: str, kind: str, pattern: str, persist: bool = True) -> bool:
+        clean = sanitize_session_rule({"kind": kind, "pattern": pattern})
+        if not clean:
+            return False
+        lst = self._session_rules.get(session_id) or []
+        nxt = [r for r in lst if r != clean]
+        if len(nxt) == len(lst):
+            return False
+        if nxt:
+            self._session_rules[session_id] = nxt
+        else:
+            self._session_rules.pop(session_id, None)
+        if persist:
+            self._persist_rules(session_id)
+        return True
+
+    def replace_session_rules(self, session_id: str, rules: list[dict], persist: bool = False) -> None:
+        cleaned: list[dict] = []
+        for rule in rules or []:
+            item = sanitize_session_rule(rule)
+            if item and item not in cleaned:
+                cleaned.append(item)
+        if cleaned:
+            self._session_rules[session_id] = cleaned
+        else:
+            self._session_rules.pop(session_id, None)
+        if persist:
+            self._persist_rules(session_id)
+
     def clear_session_rules(self, session_id: str) -> None:
         self._session_rules.pop(session_id, None)
         try:
@@ -68,14 +97,29 @@ class ApprovalGate:
             fire_and_forget(delete_session_rules(session_id))
         except Exception:
             logger.debug("clear session rules redis failed", exc_info=True)
+        try:
+            from app.core.rtstore import fire_and_forget as _ff
+            from app.persist import save_session_allow_rules
+
+            _ff(save_session_allow_rules(session_id, []))
+        except Exception:
+            logger.debug("clear session rules mysql failed", exc_info=True)
 
     def _persist_rules(self, session_id: str) -> None:
+        rules = self.get_session_rules(session_id)
         try:
             from app.core.rtstore import fire_and_forget, set_session_rules
 
-            fire_and_forget(set_session_rules(session_id, self.get_session_rules(session_id)))
+            fire_and_forget(set_session_rules(session_id, rules))
         except Exception:
-            logger.debug("persist session rules failed", exc_info=True)
+            logger.debug("persist session rules redis failed", exc_info=True)
+        try:
+            from app.core.rtstore import fire_and_forget
+            from app.persist import save_session_allow_rules
+
+            fire_and_forget(save_session_allow_rules(session_id, rules))
+        except Exception:
+            logger.debug("persist session rules mysql failed", exc_info=True)
 
     # ---------- 审批 ----------
 

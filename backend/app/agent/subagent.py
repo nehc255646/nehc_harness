@@ -18,13 +18,29 @@ from app.agent.context import (
     window_slice,
 )
 from app.agent.executor import Executor
-from app.agent.prompts import INTERACTIVE_SYSTEM_PROMPT, WORKER_SYSTEM_PROMPT
-from app.agent.spawn_policy import validate_worker_tasks, worker_brief_messages
+from app.agent.prompts import (
+    EXPLORE_WORKER_SYSTEM_PROMPT,
+    INTERACTIVE_SYSTEM_PROMPT,
+    WORKER_SYSTEM_PROMPT,
+)
+from app.agent.spawn_policy import (
+    WorkerSpec,
+    format_batch_report,
+    path_in_scope,
+    validate_worker_tasks,
+    worker_brief_messages,
+)
 from app.agent.stream import iter_channels
 from app.core.config import settings
 from app.permissions.gate import gate
 from app.permissions.policy import check_policy
-from app.tools.registry import SPAWN_TOOLS, TOOLS, normalize_work_mode, tools_for_work_mode
+from app.tools.registry import (
+    READONLY_TOOLS,
+    SPAWN_TOOLS,
+    TOOLS,
+    normalize_work_mode,
+    tools_for_work_mode,
+)
 
 logger = logging.getLogger("neharness.subagent")
 
@@ -69,6 +85,10 @@ class SubAgentRecord:
     late: bool = False
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    files: list[str] = field(default_factory=list)
+    files_changed: list[str] = field(default_factory=list)
+    done_when: str = ""
+    mode: str = "implement"
 
 
 # 全局注册表 (单进程)
@@ -129,11 +149,28 @@ def get_active_count(session_id: str) -> int:
     return cnt
 
 
+def _panel_messages_from_history(history: list[dict] | None, subagent_id: str) -> list[dict]:
+    out: list[dict] = []
+    for i, m in enumerate(history or []):
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content")
+        if isinstance(content, dict):
+            content = content.get("text") or ""
+        text = str(content or "")
+        if not text:
+            continue
+        out.append({"id": f"{subagent_id}-{i}", "role": role, "content": text})
+    return out
+
+
 def get_panels(session_id: str) -> list[dict]:
     out = []
     for sid in _session_index.get(session_id, set()):
         rec = _subagents.get(sid)
         if rec and rec.kind == "interactive":
+            loop = _loops.get(rec.subagent_id)
             out.append(
                 {
                     "subagent_id": rec.subagent_id,
@@ -142,6 +179,7 @@ def get_panels(session_id: str) -> list[dict]:
                     "status": rec.status,
                     "result": rec.result,
                     "late": rec.late,
+                    "messages": _panel_messages_from_history(loop.history if loop else [], rec.subagent_id),
                 }
             )
     return out
@@ -160,6 +198,7 @@ def get_workers(session_id: str) -> list[dict]:
                     "batch_id": rec.batch_id,
                     "late": rec.late,
                     "result": rec.result,
+                    "mode": rec.mode,
                 }
             )
     return out
@@ -176,6 +215,35 @@ def running_worker_tasks(session_id: str) -> list[str]:
         if rec and rec.kind == "worker" and rec.status == "running" and rec.task:
             out.append(rec.task)
     return out
+
+
+def get_active_worker_count(session_id: str) -> int:
+    n = 0
+    for sid in _session_index.get(session_id, set()):
+        rec = _subagents.get(sid)
+        if rec and rec.kind == "worker" and rec.status == "running":
+            n += 1
+    return n
+
+
+def collect_worker_report(subagent_id: str) -> dict:
+    rec = _subagents.get(subagent_id)
+    if not rec:
+        return {
+            "subagent_id": subagent_id,
+            "status": "error",
+            "result": "[丢失]",
+            "files_changed": [],
+        }
+    return {
+        "subagent_id": rec.subagent_id,
+        "task": rec.task,
+        "mode": rec.mode,
+        "status": rec.status,
+        "result": rec.result or "",
+        "files_changed": list(rec.files_changed or []),
+        "done_when": rec.done_when or "",
+    }
 
 
 # ---------- SubAgentLoop ----------
@@ -197,6 +265,9 @@ class SubAgentLoop:
         batch_id: str | None = None,
         manager_get=None,
         work_mode: str = "auto",
+        done_when: str = "",
+        files: list[str] | None = None,
+        mode: str = "implement",
     ):
         self.session_id = session_id
         self.subagent_id = subagent_id
@@ -211,6 +282,9 @@ class SubAgentLoop:
         self.batch_id = batch_id
         self.manager_get = manager_get
         self.work_mode = normalize_work_mode(work_mode)
+        self.done_when = done_when or ""
+        self.files = list(files or [])
+        self.mode = "explore" if str(mode).strip().lower() == "explore" else "implement"
         self.queue: asyncio.Queue = asyncio.Queue()
         self.history: list[dict] = []
         self.state = "running"
@@ -228,7 +302,13 @@ class SubAgentLoop:
     def _build_initial_history(self):
         if self.kind == "worker":
             self.history = worker_brief_messages(
-                self.task, self.behavior_desc, self.summary, self.snapshot
+                self.task,
+                self.behavior_desc,
+                self.summary,
+                self.snapshot,
+                done_when=self.done_when,
+                files=self.files,
+                mode=self.mode,
             )
             return
         # 交互型只带主对话快照作背景；不注入假 user 消息，等侧栏真实输入再调模型
@@ -245,17 +325,41 @@ class SubAgentLoop:
         return self.work_mode
 
     def _worker_tools(self):
+        if self.mode == "explore":
+            from app.tools.files import glob, grep, read
+
+            return [read, glob, grep, finish_worker]
         blocked = SPAWN_TOOLS | {"finish_task"}
         tools = [t for t in tools_for_work_mode(self._effective_work_mode()) if t.name not in blocked]
         return tools + [finish_worker]
 
     def _build_messages(self) -> list[dict]:
         _slid, window = window_slice(self.history, settings.window_n)
-        system = INTERACTIVE_SYSTEM_PROMPT if self.kind == "interactive" else WORKER_SYSTEM_PROMPT
+        if self.kind == "interactive":
+            system = INTERACTIVE_SYSTEM_PROMPT
+        elif self.mode == "explore":
+            system = EXPLORE_WORKER_SYSTEM_PROMPT
+        else:
+            system = WORKER_SYSTEM_PROMPT
         return build_messages(system, self.summary, window, [])
 
     async def enqueue_user(self, content: str):
         await self.queue.put({"type": "user_message", "content": content})
+
+    async def _persist_interactive(self, role: str, content: str) -> None:
+        if self.kind != "interactive":
+            return
+        try:
+            from app import persist as persist_mod
+
+            await persist_mod.save_message(
+                session_id=self.session_id,
+                agent_id=self.subagent_id,
+                role=role,
+                content=content,
+            )
+        except Exception:
+            logger.debug("persist interactive message failed", exc_info=True)
 
     async def run(self):
         logger.info("SubAgent run start: %s kind=%s session=%s", self.subagent_id, self.kind, self.session_id)
@@ -308,7 +412,14 @@ class SubAgentLoop:
             except asyncio.QueueEmpty:
                 break
             if ev.get("type") == "user_message":
-                self.history.append({"role": "user", "content": ev.get("content", "")})
+                text = ev.get("content", "")
+                self.history.append({"role": "user", "content": text})
+                try:
+                    from app.core import rtstore
+
+                    rtstore.fire_and_forget(self._persist_interactive("user", text))
+                except Exception:
+                    logger.debug("queue persist interactive user failed", exc_info=True)
                 got = True
         return got
 
@@ -329,7 +440,14 @@ class SubAgentLoop:
                 await self._finish("done", "[空闲超时] 用户未继续对话，交互型子 agent 自动收敛")
                 return False
             if ev.get("type") == "user_message":
-                self.history.append({"role": "user", "content": ev.get("content", "")})
+                text = ev.get("content", "")
+                self.history.append({"role": "user", "content": text})
+                try:
+                    from app.core import rtstore
+
+                    rtstore.fire_and_forget(self._persist_interactive("user", text))
+                except Exception:
+                    logger.debug("queue persist interactive user failed", exc_info=True)
                 self._drain_interactive_user()
                 return True
 
@@ -354,7 +472,8 @@ class SubAgentLoop:
                 result = await self._call_model(messages)
             except Exception as e:
                 logger.exception("SubAgent model call failed")
-                if getattr(self.executor, "unresolved", False):
+                live = bool(getattr(self.executor, "_llm", None)) and not getattr(self.executor, "demo", False)
+                if getattr(self.executor, "unresolved", False) or live:
                     await self._finish("error", f"[模型错误] {e}")
                     break
                 try:
@@ -372,6 +491,7 @@ class SubAgentLoop:
                 await self._emit_text(text)
             elif already_streamed and text:
                 self.history.append({"role": "assistant", "content": text})
+                await self._persist_interactive("assistant", text)
 
             if tool_calls:
                 finish_name = "finish_subagent" if self.kind == "interactive" else "finish_worker"
@@ -404,7 +524,16 @@ class SubAgentLoop:
                 if fin:
                     args = fin.get("args") or {}
                     summary = args.get("summary") or args.get("result") or str(args) or text
-                    await self._finish("done", summary)
+                    extra_files = args.get("files_changed") or []
+                    rec = _subagents.get(self.subagent_id)
+                    if rec:
+                        for f in extra_files if isinstance(extra_files, list) else [extra_files]:
+                            text_f = str(f or "").strip()
+                            if text_f and text_f not in rec.files_changed:
+                                rec.files_changed.append(text_f)
+                    st = str(args.get("status") or "done").strip().lower()
+                    finish_status = "error" if st in ("failed", "error") else "done"
+                    await self._finish(finish_status, str(summary))
                     break
                 continue
             else:
@@ -542,11 +671,25 @@ class SubAgentLoop:
                 return {"text": "收到，准备收敛。", "tool_calls": [{"name": "finish_subagent", "args": {"summary": f"用户确认完成: {last_user[:100]}"}, "id": str(uuid.uuid4())}]}
             return {"text": f"收到: {last_user}\n(演示模式，发送包含 'finish' 的消息以触发 finish_subagent)", "tool_calls": []}
         else:
+            if self.mode == "explore":
+                if self._round == 1:
+                    return {
+                        "text": "只读摸底",
+                        "tool_calls": [{"name": "glob", "args": {"pattern": "**/*"}, "id": str(uuid.uuid4())}],
+                    }
+                return {
+                    "text": "调研完成",
+                    "tool_calls": [{
+                        "name": "finish_worker",
+                        "args": {"result": f"已完成调研: {self.task}", "status": "done", "files_changed": []},
+                        "id": str(uuid.uuid4()),
+                    }],
+                }
             # 工作型：演示执行一次 shell echo
             if self._round == 1:
                 return {"text": "工作型开始执行", "tool_calls": [{"name": "shell", "args": {"command": f"echo worker:{self.task[:30]}"}, "id": str(uuid.uuid4())}]}
             # 第二轮收敛
-            return {"text": "工作完成", "tool_calls": [{"name": "finish_worker", "args": {"result": f"已完成任务: {self.task}"}, "id": str(uuid.uuid4())}]}
+            return {"text": "工作完成", "tool_calls": [{"name": "finish_worker", "args": {"result": f"已完成任务: {self.task}", "status": "done"}, "id": str(uuid.uuid4())}]}
 
     async def _emit_text(self, content: str):
         mid = str(uuid.uuid4())
@@ -558,6 +701,7 @@ class SubAgentLoop:
             await asyncio.sleep(0.02)
         await _broadcast(self.session_id, "message.done", {"message_id": mid, "role": "assistant", "content": content, "subagent_id": self.subagent_id}, self.broadcaster)
         self.history.append({"role": "assistant", "content": content})
+        await self._persist_interactive("assistant", content)
 
     async def _dispatch_worker_tools(self, tool_calls: list[dict]) -> list[dict]:
         async def _run_one(tc: dict) -> dict:
@@ -573,6 +717,14 @@ class SubAgentLoop:
                 # finish_worker 已在外层 _run_loop 拦截收敛，不进入分发
                 if name in ("spawn_worker", "spawn_workers", "spawn_subagent"):
                     return {"call_id": call_id, "name": name, "result": "[拒绝] 工作型不支持递归派生", "is_error": True}
+                if self.mode == "explore" and name not in READONLY_TOOLS and name != "finish_worker":
+                    result = f"[拒绝] explore 工人只读，禁止 {name}"
+                    await self._persist_worker_log(name, args, result, call_id, True, "blocked", "explore_readonly")
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
+                if name in ("write", "edit") and self.files and not path_in_scope(str(args.get("path") or ""), self.files):
+                    result = f"[拒绝] 路径不在工人 files 范围内: {args.get('path')}"
+                    await self._persist_worker_log(name, args, result, call_id, True, "blocked", "files_scope")
+                    return {"call_id": call_id, "name": name, "result": result, "is_error": True}
                 if name == "finish_task":
                     return {
                         "call_id": call_id,
@@ -689,6 +841,8 @@ class SubAgentLoop:
                 result, extra = apply_write(str(args.get("path") or ""), str(args.get("content") or ""))
                 diff = (extra or {}).get("diff")
                 is_error = str(result).startswith("[错误]")
+                if not is_error:
+                    self._note_file_changed(str(args.get("path") or ""))
             elif name == "edit":
                 from app.tools.files import apply_edit
 
@@ -699,6 +853,8 @@ class SubAgentLoop:
                 )
                 diff = (extra or {}).get("diff")
                 is_error = str(result).startswith("[错误]")
+                if not is_error:
+                    self._note_file_changed(str(args.get("path") or ""))
             else:
                 tool_obj = WORKER_TOOL_MAP.get(name)
                 if not tool_obj:
@@ -733,6 +889,14 @@ class SubAgentLoop:
             await self._persist_worker_log(name, args, result, call_id, True, decision, reason or None)
             return {"call_id": call_id, "name": name, "result": result, "is_error": True}
 
+    def _note_file_changed(self, path: str) -> None:
+        p = (path or "").strip()
+        if not p:
+            return
+        rec = _subagents.get(self.subagent_id)
+        if rec and p not in rec.files_changed:
+            rec.files_changed.append(p)
+
     async def _handle_worker_finish(self, result: str, status: str):
         # 由 finish_worker 触发的回投，需经 batch 聚合
         rec = _subagents.get(self.subagent_id)
@@ -744,7 +908,7 @@ class SubAgentLoop:
         if not batch:
             await _enqueue_to_main_single(self.session_id, self.subagent_id, result, status, self.main_enqueue, self.broadcaster, self.manager_get)
             return
-        batch["results"][self.subagent_id] = {"status": status, "result": result}
+        batch["results"][self.subagent_id] = collect_worker_report(self.subagent_id)
         # 原子检查是否全部完成（避免并发时双重回投：先检查再广播，无 await 间隙）
         if len(batch["results"]) >= batch["total"]:
             # 仅首个完成的 worker 负责聚合，后续直接返回
@@ -752,8 +916,7 @@ class SubAgentLoop:
                 return
             workers_payload = []
             for wid in batch["workers"]:
-                r = batch["results"].get(wid, {"status": "error", "result": "[未完成]"})
-                workers_payload.append({"subagent_id": wid, "status": r["status"], "result": r["result"]})
+                workers_payload.append(batch["results"].get(wid) or collect_worker_report(wid))
             # 检查主 agent 迟到
             main_agent = None
             if self.manager_get:
@@ -768,14 +931,19 @@ class SubAgentLoop:
                     if rc:
                         rc.late = True
             payload = {"batch_id": rec.batch_id, "workers": workers_payload}
-            # 先清理防止并发重复
-            _batches.pop(rec.batch_id, None)
+            waiting_parent = bool(batch.get("wait"))
+            if not waiting_parent:
+                _batches.pop(rec.batch_id, None)
             if late:
                 # 迟到：仅广播供前端观测，不注入主队列（不唤醒已 done 的主 agent，PLAN §2.4）
                 await _broadcast(self.session_id, "worker.batch_done", payload, self.broadcaster)
                 await _broadcast(self.session_id, "worker.status", {"workers": get_workers(self.session_id)}, self.broadcaster)
                 return
-            # 注入主队列
+            if waiting_parent:
+                # 主 agent 阻塞在 spawn_* 上，报告作为 tool 结果返回，不伪装成用户消息
+                await _broadcast(self.session_id, "worker.batch_done", payload, self.broadcaster)
+                await _broadcast(self.session_id, "worker.status", {"workers": get_workers(self.session_id)}, self.broadcaster)
+                return
             try:
                 await self.main_enqueue({"type": "worker_batch_done", "payload": payload})
             except Exception as e:
@@ -922,19 +1090,30 @@ async def open_interactive_for_user(
 
 async def spawn_worker_batch(
     session_id: str,
-    tasks: list[str],
+    tasks: list,
     main_history: list[dict],
     summary: str | None,
     broadcaster,
     main_enqueue,
     manager_get,
     constraints: str | None = None,
+    *,
+    wait: bool = True,
+    stop_event: asyncio.Event | None = None,
 ) -> str:
-    if not tasks:
+    specs: list[WorkerSpec] = []
+    for t in tasks or []:
+        if isinstance(t, WorkerSpec):
+            specs.append(t)
+        else:
+            text = str(t).strip()
+            if text:
+                specs.append(WorkerSpec(task=text, done_when=text, files=[], mode="implement"))
+    if not specs:
         return "[错误] 未提供任务"
-    if len(tasks) > settings.max_workers_per_turn:
-        return f"[拒绝] 单轮派生不超过 {settings.max_workers_per_turn}，本次请求 {len(tasks)}"
-    bad = validate_worker_tasks(tasks, main_history, running_worker_tasks(session_id))
+    if len(specs) > settings.max_workers_per_turn:
+        return f"[拒绝] 单轮派生不超过 {settings.max_workers_per_turn}，本次请求 {len(specs)}"
+    bad = validate_worker_tasks(specs, main_history, running_worker_tasks(session_id))
     if bad:
         return bad
     work_mode = "auto"
@@ -946,23 +1125,26 @@ async def spawn_worker_batch(
         except Exception:
             logger.debug("snapshot parent work_mode failed", exc_info=True)
     async with _spawn_lock(session_id):
-        if get_active_count(session_id) + len(tasks) > settings.subagent_max_concurrency:
-            return f"[拒绝] 总并发不超过 {settings.subagent_max_concurrency}，当前活跃 {get_active_count(session_id)}，请求 {len(tasks)}"
+        if get_active_count(session_id) + len(specs) > settings.subagent_max_concurrency:
+            return f"[拒绝] 总并发不超过 {settings.subagent_max_concurrency}，当前活跃 {get_active_count(session_id)}，请求 {len(specs)}"
         batch_id = f"batch_{uuid.uuid4().hex[:8]}"
         snapshot = _snapshot_history(main_history)
         spawned = []
-        opened: list[tuple[str, str]] = []
-        _batches[batch_id] = {"workers": [], "results": {}, "total": len(tasks)}
-        for t in tasks:
+        opened: list[tuple[str, WorkerSpec]] = []
+        _batches[batch_id] = {"workers": [], "results": {}, "total": len(specs), "wait": wait}
+        for spec in specs:
             subagent_id = f"wk_{uuid.uuid4().hex[:8]}"
             rec = SubAgentRecord(
                 subagent_id=subagent_id,
                 session_id=session_id,
                 kind="worker",
                 status="running",
-                task=t,
+                task=spec.task,
                 behavior_desc=constraints or "",
                 batch_id=batch_id,
+                files=list(spec.files),
+                done_when=spec.done_when,
+                mode=spec.mode,
             )
             _subagents[subagent_id] = rec
             _session_index.setdefault(session_id, set()).add(subagent_id)
@@ -971,7 +1153,7 @@ async def spawn_worker_batch(
                 session_id,
                 subagent_id,
                 "worker",
-                t,
+                spec.task,
                 constraints or "",
                 snapshot,
                 summary,
@@ -980,14 +1162,22 @@ async def spawn_worker_batch(
                 batch_id=batch_id,
                 manager_get=manager_get,
                 work_mode=work_mode,
+                done_when=spec.done_when,
+                files=spec.files,
+                mode=spec.mode,
             )
             _loops[subagent_id] = loop
             task_obj = asyncio.create_task(loop.run())
             _tasks[subagent_id] = task_obj
             spawned.append(subagent_id)
-            opened.append((subagent_id, t))
-    for subagent_id, t in opened:
-        await _broadcast(session_id, "subagent.opened", {"subagent_id": subagent_id, "kind": "worker", "session_id": session_id, "task": t[:80]}, broadcaster)
+            opened.append((subagent_id, spec))
+    for subagent_id, spec in opened:
+        await _broadcast(
+            session_id,
+            "subagent.opened",
+            {"subagent_id": subagent_id, "kind": "worker", "session_id": session_id, "task": spec.task[:80], "mode": spec.mode},
+            broadcaster,
+        )
         try:
             from app import persist as persist_mod
 
@@ -996,17 +1186,50 @@ async def spawn_worker_batch(
                 subagent_id=subagent_id,
                 kind="worker",
                 behavior_desc=constraints or "",
-                goal=t,
+                goal=spec.task,
                 status="running",
             )
         except Exception:
             logger.debug("persist worker run failed", exc_info=True)
     await _broadcast(session_id, "worker.status", {"workers": get_workers(session_id)}, broadcaster)
-    logger.info("Spawn workers batch=%s count=%d session=%s", batch_id, len(tasks), session_id)
-    return (
-        f"[已派生后台工作型] batch_id={batch_id} workers={spawned} 任务: {tasks}。"
-        "这些子任务已交出，你不要再做同一件事；等待 [工作型批量完成] 后聚合。"
-    )
+    logger.info("Spawn workers batch=%s count=%d wait=%s session=%s", batch_id, len(specs), wait, session_id)
+    if not wait:
+        return (
+            f"[已派生后台工作型] batch_id={batch_id} workers={spawned} 任务: {[s.task for s in specs]}。"
+            "这些子任务已交出，你不要再做同一件事；等待批次报告后聚合。"
+        )
+
+    async def _wait_workers():
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                for sid in spawned:
+                    try:
+                        await stop_subagent(sid)
+                    except Exception:
+                        logger.debug("stop worker on parent stop failed", exc_info=True)
+                return
+            still = [sid for sid in spawned if (_subagents.get(sid) and _subagents[sid].status == "running")]
+            pending = [_tasks[sid] for sid in spawned if sid in _tasks]
+            if not still and not pending:
+                return
+            if pending:
+                await asyncio.wait(pending, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.sleep(0.05)
+
+    try:
+        await asyncio.wait_for(_wait_workers(), timeout=settings.worker_timeout + 15)
+    except TimeoutError:
+        logger.info("Wait workers timeout batch=%s", batch_id)
+        for sid in spawned:
+            try:
+                await stop_subagent(sid)
+            except Exception:
+                logger.debug("stop worker on wait timeout failed", exc_info=True)
+
+    workers_payload = [collect_worker_report(sid) for sid in spawned]
+    _batches.pop(batch_id, None)
+    return format_batch_report(workers_payload)
 
 
 async def handle_subagent_response(session_id: str, subagent_id: str, content: str) -> bool:

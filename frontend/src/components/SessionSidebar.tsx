@@ -171,7 +171,7 @@ export default function SessionSidebar({
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="truncate text-[13px] font-medium">{s.title || s.id.slice(0, 8)}</span>
-                    {active && agentState === "running" && (
+                    {active && (agentState === "running" || agentState === "awaiting_workers") && (
                       <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400" />
                     )}
                   </div>

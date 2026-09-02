@@ -55,7 +55,7 @@ type WorkerItem = {
   late?: boolean;
   result?: string;
 };
-type AgentState = "idle" | "running" | "awaiting_approval" | "done" | "error";
+type AgentState = "idle" | "running" | "awaiting_approval" | "awaiting_workers" | "done" | "error";
 
 type State = {
   messages: Message[];
@@ -78,6 +78,7 @@ type State = {
   sendMessage: (content: string) => void;
   sendSubagentMessage: (subagent_id: string, content: string) => void;
   respondApproval: (approval_id: string, decision: "approve" | "approve_similar" | "reject") => void;
+  revokeAllowRule: (kind: string, pattern: string) => void;
   dismissPanel: (subagent_id: string) => void;
   restorePanels: () => void;
   setSubPanelOpen: (open: boolean) => void;
@@ -166,10 +167,14 @@ function bindHandlers(set: (partial: Partial<State> | ((s: State) => Partial<Sta
       const incomingPanels = Array.isArray(p.subagent_panels) ? (p.subagent_panels as SubPanel[]) : s.subPanels;
       const merged = incomingPanels.map((np) => {
         const old = s.subPanels.find((x) => x.subagent_id === np.subagent_id);
-        return { ...np, messages: old?.messages || [] };
+        const incomingMsgs = Array.isArray(np.messages) ? np.messages : [];
+        return { ...np, messages: incomingMsgs.length ? incomingMsgs : old?.messages || [] };
       });
       const switched = sid2 !== s.sessionId;
-      const live = p.agent_state === "running" || p.agent_state === "awaiting_approval";
+      const live =
+        p.agent_state === "running" ||
+        p.agent_state === "awaiting_approval" ||
+        p.agent_state === "awaiting_workers";
       return {
         sessionId: sid2,
         sessionTitle: (p.title as string) || s.sessionTitle,
@@ -671,6 +676,12 @@ export const useAgentStore = create<State>((set, get) => ({
   respondApproval: (approval_id, decision) => {
     set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.approval_id !== approval_id) }));
     wsClient.send("approval.response", { approval_id, decision });
+  },
+  revokeAllowRule: (kind, pattern) => {
+    wsClient.send("session.allow_revoke", { kind, pattern });
+    set((s) => ({
+      sessionAllowRules: s.sessionAllowRules.filter((r) => !(r.kind === kind && r.pattern === pattern)),
+    }));
   },
   sendSubagentMessage: (subagent_id, content) => {
     const sid = get().sessionId;

@@ -158,7 +158,7 @@ async def update_session_fields(session_id: str, **fields: Any) -> ChatSession |
         if not row:
             return None
         for k, v in fields.items():
-            if k in ("title", "model_id", "status", "summary", "work_mode") and hasattr(row, k):
+            if k in ("title", "model_id", "status", "summary", "work_mode", "allow_rules") and hasattr(row, k):
                 setattr(row, k, v)
         row.updated_at = utcnow()
         await db.flush()
@@ -459,7 +459,9 @@ async def load_history(session_id: str) -> tuple[list[dict], str | None, int | N
             rows = list(
                 (
                     await db.scalars(
-                        select(Message).where(Message.session_id == session_id).order_by(Message.id.asc())
+                        select(Message)
+                        .where(Message.session_id == session_id, Message.agent_id == "main")
+                        .order_by(Message.id.asc())
                     )
                 ).all()
             )
@@ -512,15 +514,67 @@ async def mark_subagent_fed_back(subagent_id: str) -> None:
         logger.debug("mark_subagent_fed_back failed: %s", e)
 
 
-async def list_messages(session_id: str) -> list[Message]:
+async def list_messages(session_id: str, agent_id: str | None = "main") -> list[Message]:
     if not is_available():
         return []
     async with session_scope() as db:
         if db is None:
             return []
-        return list(
-            (await db.scalars(select(Message).where(Message.session_id == session_id).order_by(Message.id.asc()))).all()
-        )
+        stmt = select(Message).where(Message.session_id == session_id)
+        if agent_id is not None:
+            stmt = stmt.where(Message.agent_id == agent_id)
+        return list((await db.scalars(stmt.order_by(Message.id.asc()))).all())
+
+
+def _clean_allow_rules(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        pattern = str(item.get("pattern") or "").strip()
+        if kind in ("shell_prefix", "tool") and pattern:
+            out.append({"kind": kind, "pattern": pattern})
+    return out
+
+
+async def list_subagent_runs(session_id: str, kind: str | None = None) -> list[SubAgentRun]:
+    if not is_available():
+        return []
+    try:
+        async with session_scope() as db:
+            if db is None:
+                return []
+            stmt = select(SubAgentRun).where(SubAgentRun.main_session_id == session_id)
+            if kind:
+                stmt = stmt.where(SubAgentRun.kind == kind)
+            return list((await db.scalars(stmt.order_by(SubAgentRun.id.asc()))).all())
+    except Exception as e:
+        logger.debug("list_subagent_runs failed: %s", e)
+        return []
+
+
+def message_row_to_panel(row: Message) -> dict | None:
+    if row.role not in ("user", "assistant"):
+        return None
+    raw = row.content if isinstance(row.content, dict) else {"text": str(row.content)}
+    text = raw.get("text", "") if isinstance(raw, dict) else str(raw)
+    if not str(text or "").strip():
+        return None
+    return {"id": row.public_id, "role": row.role, "content": str(text)}
+
+
+async def load_session_allow_rules(session_id: str) -> list[dict]:
+    row = await get_session(session_id)
+    if row is None:
+        return []
+    return _clean_allow_rules(getattr(row, "allow_rules", None))
+
+
+async def save_session_allow_rules(session_id: str, rules: list[dict]) -> None:
+    await update_session_fields(session_id, allow_rules=_clean_allow_rules(rules))
 
 
 async def get_tool_log(session_id: str, tool_call_id: str) -> ToolLog | None:

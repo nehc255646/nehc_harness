@@ -2,7 +2,11 @@
 
 from app.agent.loop import AgentLoop
 from app.agent.spawn_policy import (
+    WorkerSpec,
+    history_has_readonly_explore,
     last_user_goal,
+    parse_worker_specs,
+    path_in_scope,
     task_restates_goal,
     tasks_redundant,
     validate_worker_tasks,
@@ -110,3 +114,75 @@ def test_heuristic_batch_word_does_not_spawn():
     names = [tc["name"] for tc in res.get("tool_calls") or []]
     assert "spawn_worker" not in names
     assert "spawn_workers" not in names
+
+
+def test_parse_worker_requires_done_when():
+    specs, err = parse_worker_specs("spawn_worker", {"task": "改 auth.py"})
+    assert specs == []
+    assert err and "done_when" in err
+
+
+def test_parse_worker_ok():
+    specs, err = parse_worker_specs(
+        "spawn_worker",
+        {"task": "改 auth.py 校验", "done_when": "登录校验有单测", "files": ["auth.py"], "mode": "implement"},
+    )
+    assert err is None
+    assert len(specs) == 1
+    assert specs[0].done_when.startswith("登录")
+    assert specs[0].files == ["auth.py"]
+
+
+def test_parse_workers_parallel_done_when():
+    specs, err = parse_worker_specs(
+        "spawn_workers",
+        {
+            "tasks": ["改 auth.py", "改 pay.py"],
+            "done_when": ["登录通过", "支付签名校验通过"],
+            "mode": "implement",
+        },
+    )
+    assert err is None
+    assert [s.task for s in specs] == ["改 auth.py", "改 pay.py"]
+    assert specs[0].done_when == "登录通过"
+
+
+def test_history_has_readonly_explore():
+    assert history_has_readonly_explore([]) is False
+    assert history_has_readonly_explore([{"role": "tool", "name": "glob", "content": "[错误] x"}]) is False
+    assert history_has_readonly_explore([{"role": "tool", "name": "glob", "content": "a.txt"}]) is True
+
+
+def test_path_in_scope():
+    assert path_in_scope("auth.py", ["auth.py"]) is True
+    assert path_in_scope("pkg/a.py", ["pkg"]) is True
+    assert path_in_scope("other.py", ["auth.py"]) is False
+    assert path_in_scope("x.py", []) is True
+
+
+def test_validate_rejects_overlapping_files():
+    hist = [{"role": "user", "content": "实现登录和支付"}]
+    msg = validate_worker_tasks(
+        [
+            WorkerSpec("改登录", "登录过", ["auth.py"], "implement"),
+            WorkerSpec("改支付", "支付过", ["auth.py"], "implement"),
+        ],
+        hist,
+    )
+    assert msg and "files" in msg
+
+
+def test_worker_brief_includes_done_when():
+    brief = worker_brief_messages(
+        "改 auth.py",
+        "",
+        None,
+        [{"role": "user", "content": "实现登录和支付"}],
+        done_when="校验函数有单测",
+        files=["auth.py"],
+        mode="explore",
+    )
+    text = brief[0]["content"]
+    assert "Done when" in text
+    assert "Allowed files" in text
+    assert "explore" in text.lower()

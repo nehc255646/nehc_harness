@@ -278,6 +278,24 @@ async def ws_endpoint(ws: WebSocket):
                         )
                     )
 
+            elif event == "session.allow_revoke":
+                kind = payload.get("kind")
+                pattern = payload.get("pattern")
+                ok = gate.remove_session_rule(session_id, str(kind or ""), str(pattern or ""))
+                if not ok:
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "event": "error",
+                                "payload": {"code": ErrorCode.INTERNAL, "message": "没有这条会话放行规则"},
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    rules = gate.get_session_rules(session_id)
+                    await broadcast(session_id, "session.update", {"session_allow_rules": rules})
+
             elif event == "subagent.response":
                 subagent_id = payload.get("subagent_id", "")
                 content = payload.get("content", "")
@@ -331,17 +349,25 @@ async def _send_hello(ws: WebSocket, session_id: str, agent):
 
     session_rules = gate.get_session_rules(session_id)
     if not session_rules:
+        db_rules: list = []
         try:
-            session_rules = await rtstore.get_session_rules(session_id)
+            from app import persist as persist_mod
+
+            db_rules = await persist_mod.load_session_allow_rules(session_id)
         except Exception:
-            session_rules = []
-        for rule in session_rules:
-            gate.add_session_rule(session_id, rule, persist=False)
-    else:
+            db_rules = []
+        redis_rules: list = []
         try:
-            await rtstore.set_session_rules(session_id, session_rules)
+            redis_rules = await rtstore.get_session_rules(session_id)
         except Exception:
-            logger.debug("hello write session rules failed", exc_info=True)
+            redis_rules = []
+        session_rules = db_rules or redis_rules or []
+        if session_rules:
+            gate.replace_session_rules(session_id, session_rules, persist=False)
+    try:
+        await rtstore.set_session_rules(session_id, session_rules)
+    except Exception:
+        logger.debug("hello write session rules failed", exc_info=True)
     try:
         from app.agent.subagent import get_panels, get_workers
 
@@ -350,6 +376,39 @@ async def _send_hello(ws: WebSocket, session_id: str, agent):
     except Exception:
         panels = []
         workers = []
+    try:
+        from app import persist as persist_mod
+
+        by_id = {p.get("subagent_id"): p for p in panels}
+        for p in panels:
+            if p.get("messages"):
+                continue
+            sid = p.get("subagent_id")
+            if not sid:
+                continue
+            rows = await persist_mod.list_messages(session_id, agent_id=str(sid))
+            msgs = [m for r in rows for m in [persist_mod.message_row_to_panel(r)] if m]
+            if msgs:
+                p["messages"] = msgs
+        for run in await persist_mod.list_subagent_runs(session_id, kind="interactive"):
+            if run.subagent_id in by_id:
+                continue
+            rows = await persist_mod.list_messages(session_id, agent_id=run.subagent_id)
+            msgs = [m for r in rows for m in [persist_mod.message_row_to_panel(r)] if m]
+            panels.append(
+                {
+                    "subagent_id": run.subagent_id,
+                    "kind": "interactive",
+                    "task": run.goal or "",
+                    "status": run.status,
+                    "result": run.result,
+                    "late": run.late,
+                    "messages": msgs,
+                }
+            )
+            by_id[run.subagent_id] = panels[-1]
+    except Exception:
+        logger.debug("hello interactive transcripts failed", exc_info=True)
     title = "Session " + session_id[:8]
     model_id = None
     work_mode = getattr(agent, "work_mode", None) or "auto"

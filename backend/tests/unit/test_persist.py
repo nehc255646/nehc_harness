@@ -11,10 +11,13 @@ from app.persist import (
     flush_pending,
     get_session,
     get_tool_log,
+    list_messages,
     load_history,
+    load_session_allow_rules,
     maybe_autotitle,
     pending_count,
     save_message,
+    save_session_allow_rules,
     save_tool_log,
     update_session_fields,
 )
@@ -125,6 +128,27 @@ async def test_tool_log_and_assistant_tool_calls(db_ready):
     assert log is not None
     assert log.message_id is not None
     assert log.decision == "approved_once"
+
+
+async def test_session_allow_rules_roundtrip(db_ready):
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="rules")
+    await save_session_allow_rules(sid, [{"kind": "shell_prefix", "pattern": "echo hello"}])
+    rules = await load_session_allow_rules(sid)
+    assert rules == [{"kind": "shell_prefix", "pattern": "echo hello"}]
+
+
+async def test_load_history_skips_subagent_messages(db_ready):
+    sid = f"ut_{uuid.uuid4().hex[:12]}"
+    await ensure_session(sid, title="hist")
+    await save_message(session_id=sid, agent_id="main", role="user", content="主对话")
+    await save_message(session_id=sid, agent_id="sub_abc", role="user", content="侧栏")
+    hist, _, _ = await load_history(sid)
+    texts = [m.get("content") for m in hist]
+    assert "主对话" in texts
+    assert "侧栏" not in texts
+    side = await list_messages(sid, agent_id="sub_abc")
+    assert len(side) == 1
 
 
 async def test_maybe_autotitle_only_placeholder(db_ready):
